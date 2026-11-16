@@ -4,35 +4,72 @@ use std::path::Path;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 
+/// Maximum allowed download size (4 GiB) to prevent disk exhaustion DoS.
+pub const MAX_DOWNLOAD_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
 pub async fn fetch_source(source: &str) -> Result<String, Box<dyn std::error::Error>> {
     if source.starts_with("http://") || source.starts_with("https://") {
-        // Try to get filename from URL
-        let filename = source
+        // Try to get filename from URL (stripping any query params and trailing slashes)
+        let clean_source = source.split('?').next().unwrap_or(source).trim_end_matches('/');
+        let raw_filename = clean_source
             .split('/')
-            .last()
-            .unwrap_or("downloaded_file")
-            .split('?')
-            .next()
-            .unwrap_or("downloaded_file")
-            .to_string();
+            .next_back()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("downloaded_file");
+
+        let filename = if raw_filename == "."
+            || raw_filename == ".."
+            || raw_filename.contains('\\')
+            || raw_filename.contains('/')
+        {
+            "downloaded_file".to_string()
+        } else {
+            raw_filename.to_string()
+        };
 
         // Skip download if file already exists (cache)
-        if Path::new(&filename).exists() {
+        if Path::new(&filename).is_file() {
             println!("Using cached {}", filename);
             return Ok(filename);
         }
 
-        let client = Client::new();
-        let response = client.get(source).send().await?;
+        println!("Downloading {} from {}...", filename, source);
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()?;
+        let response = client.get(source).send().await?.error_for_status()?;
 
-        let mut file = File::create(&filename).await?;
+        let part_filename = format!("{}.part", filename);
+        let mut file = File::create(&part_filename).await?;
         let mut stream = response.bytes_stream();
+        let mut total_bytes: u64 = 0;
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            file.write_all(&chunk).await?;
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = fs::remove_file(&part_filename).await;
+                    return Err(Box::new(e));
+                }
+            };
+            total_bytes += chunk.len() as u64;
+            if total_bytes > MAX_DOWNLOAD_SIZE {
+                let _ = fs::remove_file(&part_filename).await;
+                return Err(format!(
+                    "Download exceeded maximum permitted size of {MAX_DOWNLOAD_SIZE} bytes"
+                )
+                .into());
+            }
+            if let Err(e) = file.write_all(&chunk).await {
+                let _ = fs::remove_file(&part_filename).await;
+                return Err(Box::new(e));
+            }
         }
+        file.flush().await?;
+        drop(file);
 
+        fs::rename(&part_filename, &filename).await?;
         println!("Download of {} complete!", filename);
         Ok(filename)
     } else {
@@ -41,6 +78,9 @@ pub async fn fetch_source(source: &str) -> Result<String, Box<dyn std::error::Er
         if !path.exists() {
             return Err(format!("Source path does not exist: {}", source).into());
         }
+        if path.is_dir() {
+            return Err(format!("Source path is a directory, not a file: {}", source).into());
+        }
 
         let filename = path
             .file_name()
@@ -48,8 +88,15 @@ pub async fn fetch_source(source: &str) -> Result<String, Box<dyn std::error::Er
             .ok_or("Invalid source path")?
             .to_string();
 
-        // If it's already in the current directory, no need to copy
-        if path.parent().map_or(true, |p| p.as_os_str().is_empty()) {
+        // If it's already in the current directory or resolves to the same file, no need to copy
+        let dest = Path::new(&filename);
+        if dest.exists() {
+            if let (Ok(p1), Ok(p2)) = (path.canonicalize(), dest.canonicalize())
+                && p1 == p2
+            {
+                return Ok(filename);
+            }
+        } else if path.parent().is_none_or(|p| p.as_os_str().is_empty()) {
             return Ok(filename);
         }
 
@@ -58,5 +105,26 @@ pub async fn fetch_source(source: &str) -> Result<String, Box<dyn std::error::Er
         println!("Copied {} to current directory", source);
 
         Ok(filename)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_fetch_source_rejects_missing_local_file() {
+        let err = fetch_source("non_existent_file_xyz_1234.tar.gz")
+            .await
+            .expect_err("missing file must error");
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_source_rejects_directory() {
+        let err = fetch_source("src")
+            .await
+            .expect_err("directory must error");
+        assert!(err.to_string().contains("is a directory"));
     }
 }

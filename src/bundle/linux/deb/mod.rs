@@ -1,2 +1,2 @@
 pub mod deb;
-pub use deb::deb_build;
+pub use deb::{deb_build, deb_package};

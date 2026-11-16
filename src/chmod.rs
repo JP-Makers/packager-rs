@@ -1,38 +1,140 @@
-use super::metadata;
+use super::metadata::{self, Metadata};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-pub fn chmod_package(pkg_dir: &str, is_appimage: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let metadata_path = "metadata";
-    let metadata = metadata::extract_metadata(metadata_path)?;
-    println!("Building Package: {}", metadata.name);
+/// Parse a single `install` directive into tokens.
+///
+/// Quoting is significant: a destination such as `/Program Files/TwinCAN/`
+/// must be wrapped in double quotes, otherwise it is split on the space and
+/// silently installed to the wrong place. Both an unterminated quote and an
+/// unquoted path that looks like it contains a space are caller errors, not
+/// something we can guess around.
+fn tokenize_line(line: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut token_has_content = false;
 
-    // Use a 'bundle' directory to avoid conflicts with source files/directories of the same name
-    let base_dir = PathBuf::from(pkg_dir);
-
-    // Clean up previous bundle if it exists
-    if base_dir.exists() {
-        fs::remove_dir_all(&base_dir)?;
+    for ch in line.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                token_has_content = true;
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if token_has_content {
+                    tokens.push(std::mem::take(&mut current));
+                    token_has_content = false;
+                }
+            }
+            c => {
+                current.push(c);
+                token_has_content = true;
+            }
+        }
     }
-    fs::create_dir_all(&base_dir)?;
 
-    // -------- Process instructions --------
+    if in_quotes {
+        return Err(format!("unterminated quote in install directive: {line:?}").into());
+    }
+    if token_has_content {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
+}
+
+/// Resolve an install destination against the package root, rejecting anything
+/// that could escape it. This is the last line of defence before `fs::copy`.
+fn safe_destination(
+    base_dir: &Path,
+    dest: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if dest.contains('\0') {
+        return Err(format!("destination contains a NUL byte: {dest:?}").into());
+    }
+    // Windows drive letter (`C:\...`) or UNC path (`\\server\share`).
+    if dest.starts_with("\\\\") || dest.as_bytes().get(1) == Some(&b':') {
+        return Err(format!("absolute destination not allowed: {dest:?}").into());
+    }
+
+    let relative = dest.trim_start_matches('/');
+    let mut depth: i32 = 0;
+
+    for component in Path::new(relative).components() {
+        match component {
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(format!("destination escapes package root: {dest:?}").into());
+                }
+            }
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("absolute destination not allowed: {dest:?}").into());
+            }
+        }
+    }
+
+    Ok(base_dir.join(relative))
+}
+
+pub fn chmod_package_with_metadata(
+    metadata: &Metadata,
+    base_dir: &Path,
+    is_appimage: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Preparing package layout: {}", metadata.name);
+
+    if base_dir == Path::new(".") || base_dir == Path::new("..") || base_dir.as_os_str().is_empty() {
+        return Err("staging directory cannot be current or parent directory".into());
+    }
+
+    if base_dir.is_symlink() {
+        return Err(format!("refusing to remove symlinked staging directory: {:?}", base_dir).into());
+    }
+
+    if base_dir.exists() {
+        let canon_base = base_dir.canonicalize()?;
+        let canon_cwd = std::env::current_dir()?.canonicalize()?;
+        if canon_base == canon_cwd {
+            return Err("refusing to delete current working directory as staging dir".into());
+        }
+        let temp_dir = std::env::temp_dir().canonicalize().unwrap_or_else(|_| std::env::temp_dir());
+        if !canon_base.starts_with(&canon_cwd) && !canon_base.starts_with(&temp_dir) {
+            return Err(format!(
+                "staging directory must be inside working directory or temp directory: {:?}",
+                base_dir
+            )
+            .into());
+        }
+        fs::remove_dir_all(base_dir)?;
+    }
+    fs::create_dir_all(base_dir)?;
+
     for line in &metadata.package_instructions {
-        process_install_line(line, &base_dir, &metadata.name, false)?;
+        process_install_line(line, base_dir, metadata.workdir(), false)?;
     }
 
     if is_appimage {
         for line in &metadata.appimage_icon_instructions {
-            process_install_line(line, &base_dir, &metadata.name, true)?;
+            process_install_line(line, base_dir, metadata.workdir(), true)?;
         }
         for line in &metadata.appimage_desktop_instructions {
-            process_install_line(line, &base_dir, &metadata.name, true)?;
+            process_install_line(line, base_dir, metadata.workdir(), true)?;
         }
     }
 
-    println!("Build Complete at {:?}", base_dir);
+    println!("Package layout complete at {:?}", base_dir);
     Ok(())
+}
+
+#[deprecated(note = "use chmod_package_with_metadata instead")]
+pub fn chmod_package(pkg_dir: &str, is_appimage: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let metadata = metadata::extract_metadata("metadata.toml")?;
+    chmod_package_with_metadata(&metadata, Path::new(pkg_dir), is_appimage)
 }
 
 fn process_install_line(
@@ -46,15 +148,14 @@ fn process_install_line(
         return Ok(());
     }
 
-    // Example: install -m755 "twincan" to "/usr/bin/"
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-    if parts.len() < 3 {
+    let parts = tokenize_line(trimmed)?;
+    if parts.len() < 2 {
         return Ok(());
     }
 
     // Mode
     let mut current_idx = 1;
-    let mode_str = if parts[current_idx].starts_with("-m") {
+    let mode_str = if current_idx < parts.len() && parts[current_idx].starts_with("-m") {
         let m = parts[current_idx].trim_start_matches("-m");
         current_idx += 1;
         m
@@ -67,14 +168,60 @@ fn process_install_line(
     if current_idx >= parts.len() {
         return Ok(());
     }
-    let source_file_name = parts[current_idx].trim_matches('"').to_string();
+    let raw_source = parts[current_idx].trim_matches('"');
     current_idx += 1;
 
-    let source_dir = Path::new(metadata_name);
-    let source_path = source_dir.join(&source_file_name);
+    // Check if source specifies "local:" prefix or is a direct local asset path
+    let (source_file_name, is_explicit_local) = if let Some(local_path) = raw_source.strip_prefix("local:") {
+        (local_path.to_string(), true)
+    } else {
+        (raw_source.to_string(), false)
+    };
 
-    if !source_path.exists() {
-        return Err(format!("Source not found: {:?}", source_path).into());
+    // Only an explicit `local:` source may point outside the work directory.
+    // Without the prefix this would be an accidental (or malicious) read of
+    // arbitrary files into a published package.
+    if !is_explicit_local
+        && Path::new(&source_file_name)
+            .components()
+            .any(|c| c == Component::ParentDir)
+    {
+        return Err(format!(
+            "source path may not escape the work directory (use a `local:` prefix if intentional): {source_file_name:?}"
+        )
+        .into());
+    }
+
+    let source_dir = Path::new(metadata_name);
+    let source_path = if is_explicit_local && Path::new(&source_file_name).exists() {
+        PathBuf::from(&source_file_name)
+    } else if source_dir.join(&source_file_name).exists() {
+        source_dir.join(&source_file_name)
+    } else if Path::new(&source_file_name).exists() {
+        PathBuf::from(&source_file_name)
+    } else {
+        return Err(format!(
+            "Source file not found: {:?} (checked inside {:?} and working directory)",
+            source_file_name, source_dir
+        )
+        .into());
+    };
+
+    let meta = fs::symlink_metadata(&source_path)?;
+    if meta.file_type().is_symlink() && !is_explicit_local {
+        return Err(format!("refusing to package a symlink: {:?}", source_path).into());
+    }
+
+    let canonical = source_path.canonicalize()?;
+    if !is_explicit_local {
+        let work_root = Path::new(metadata_name).canonicalize()?;
+        if !canonical.starts_with(&work_root) {
+            return Err(format!(
+                "source resolves outside the work directory: {:?}",
+                canonical
+            )
+            .into());
+        }
     }
 
     if source_path.is_dir() {
@@ -83,9 +230,11 @@ fn process_install_line(
 
     // Destination
     let dest_path_str = if current_idx < parts.len() && parts[current_idx] == "to" {
-        current_idx += 1;
+        current_idx += 1; // consume "to"
         if current_idx < parts.len() {
-            parts[current_idx].trim_matches('"').to_string()
+            let dest = parts[current_idx].trim_matches('"').to_string();
+            current_idx += 1; // consume the destination
+            dest
         } else {
             "/".to_string()
         }
@@ -95,14 +244,29 @@ fn process_install_line(
         return Ok(()); // Skip if no destination and not defaulting to root
     };
 
-    let dest_path_trimmed = dest_path_str.trim_start_matches('/');
-    let mut full_dest = base_dir.join(dest_path_trimmed);
+    // The grammar is exactly `install -m<mode> <source> [to <destination>]`.
+    // Anything left over means an unquoted path containing spaces was split,
+    // which used to silently install files into the wrong directory (e.g.
+    // `/Program Files/TwinCAN/` landing in `/Program`).
+    if current_idx < parts.len() {
+        return Err(format!(
+            "unexpected trailing tokens after the install destination (quote any path containing spaces): {:?}",
+            &parts[current_idx..]
+        )
+        .into());
+    }
 
-    // If destination is directory → append filename
-    if dest_path_str.ends_with('/') || !Path::new(&dest_path_str).extension().is_some() {
-        if let Some(file_name) = Path::new(&source_file_name).file_name() {
-            full_dest = full_dest.join(file_name);
-        }
+    // Reject any destination that walks above the package root *before*
+    // creating directories, so nothing is written outside the staging tree.
+    let mut full_dest = safe_destination(base_dir, &dest_path_str)?;
+
+    // If destination is a directory (explicit trailing slash or root), append filename
+    let is_dir_target = dest_path_str.ends_with('/') || dest_path_str == "/" || full_dest.is_dir();
+    if is_dir_target
+        && let Some(file_name) = Path::new(&source_file_name).file_name()
+    {
+        // `file_name()` yields a single component, so this cannot escape.
+        full_dest = full_dest.join(file_name);
     }
 
     println!("Installing:");
@@ -118,10 +282,254 @@ fn process_install_line(
     // Copy
     fs::copy(&source_path, &full_dest)?;
 
+    // Defence in depth: resolve symlinks and confirm we stayed inside the root.
+    let root = base_dir.canonicalize()?;
+    let written = full_dest.canonicalize()?;
+    if !written.starts_with(&root) {
+        let _ = fs::remove_file(&written);
+        return Err(format!(
+            "destination escaped package root after resolution: {dest_path_str:?}"
+        )
+        .into());
+    }
+
     // Set permissions
     let mut perms = fs::metadata(&full_dest)?.permissions();
     perms.set_mode(mode);
     fs::set_permissions(&full_dest, perms)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("twincan-chmod-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn test_tokenize_line_with_quotes_and_spaces() {
+        let line = r#"install -m755 "Twin CAN/Twin CAN" to "/usr/bin/""#;
+        let tokens = tokenize_line(line).expect("tokenize");
+        assert_eq!(
+            tokens,
+            vec!["install", "-m755", "Twin CAN/Twin CAN", "to", "/usr/bin/"]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_line_without_destination() {
+        let line = r#"install -m644 "TwinCAN/TwinCAN.desktop""#;
+        let tokens = tokenize_line(line).expect("tokenize");
+        assert_eq!(tokens, vec!["install", "-m644", "TwinCAN/TwinCAN.desktop"]);
+    }
+
+    #[test]
+    fn test_tokenize_line_with_local_prefix() {
+        let line = r#"install -m644 "local:./metadata" to "/usr/share/doc/twincan/""#;
+        let tokens = tokenize_line(line).expect("tokenize");
+        assert_eq!(
+            tokens,
+            vec!["install", "-m644", "local:./metadata", "to", "/usr/share/doc/twincan/"]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_line_rejects_unterminated_quote() {
+        let err = tokenize_line(r#"install -m644 "TwinCAN/LICENSE to /usr/"#)
+            .expect_err("unterminated quote must be an error");
+        assert!(err.to_string().contains("unterminated quote"));
+    }
+
+    #[test]
+    fn test_safe_destination_rejects_parent_traversal() {
+        let base = Path::new("pkg");
+        let err = safe_destination(base, "/../../escaped.txt")
+            .expect_err("traversal must be rejected");
+        assert!(err.to_string().contains("escapes package root"));
+    }
+
+    #[test]
+    fn test_safe_destination_rejects_drive_and_unc_paths() {
+        let base = Path::new("pkg");
+        assert!(safe_destination(base, r"C:\Windows\evil.dll").is_err());
+        assert!(safe_destination(base, r"\\server\share\evil.dll").is_err());
+    }
+
+    #[test]
+    fn test_safe_destination_accepts_nested_paths() {
+        let base = Path::new("pkg");
+        let got = safe_destination(base, "/usr/bin/").expect("nested path is fine");
+        assert_eq!(got, Path::new("pkg/usr/bin"));
+    }
+
+    #[test]
+    fn test_windows_path_with_space_is_one_component() {
+        let tokens = tokenize_line(
+            r#"install -m755 "TwinCAN/TwinCAN" to "/Program Files/TwinCAN/""#,
+        )
+        .expect("tokenize");
+        assert_eq!(tokens[4], "/Program Files/TwinCAN/");
+    }
+
+    #[test]
+    fn test_install_rejects_traversal_end_to_end() {
+        let dir = tmpdir("traversal");
+        let base = dir.join("pkg");
+        fs::create_dir_all(&base).unwrap();
+
+        let source = dir.join("payload.txt");
+        fs::write(&source, b"payload").unwrap();
+
+        let line = format!(
+            "install -m644 \"local:{}\" to \"/../../escaped.txt\"",
+            source.display()
+        );
+        let err = process_install_line(&line, &base, "work", false)
+            .expect_err("traversal must be refused");
+        assert!(err.to_string().contains("escapes package root"));
+        assert!(!dir.join("escaped.txt").exists());
+        assert!(!dir.parent().unwrap().join("escaped.txt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_install_writes_inside_root() {
+        let dir = tmpdir("inside");
+        let base = dir.join("pkg");
+        fs::create_dir_all(&base).unwrap();
+
+        let source = dir.join("LICENSE");
+        fs::write(&source, b"license text").unwrap();
+
+        let line = format!(
+            "install -m644 \"local:{}\" to \"/usr/share/licenses/twincan/\"",
+            source.display()
+        );
+        process_install_line(&line, &base, "work", false).expect("install should succeed");
+
+        assert!(base.join("usr/share/licenses/twincan/LICENSE").is_file());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_install_rejects_unquoted_path_with_spaces() {
+        let dir = tmpdir("unquoted");
+        let base = dir.join("pkg");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(dir.join("TwinCAN"), b"bin").unwrap();
+
+        let err = process_install_line(
+            &format!("install -m755 \"local:{}\" to /Program Files/TwinCAN/", dir.join("TwinCAN").display()),
+            &base,
+            "work",
+            false,
+        )
+        .expect_err("unquoted path with spaces must be rejected, not split");
+        assert!(err.to_string().contains("unexpected trailing tokens"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_install_rejects_parent_source_without_local_prefix() {
+        let dir = tmpdir("source");
+        let base = dir.join("pkg");
+        fs::create_dir_all(&base).unwrap();
+
+        let err = process_install_line(
+            "install -m644 \"../../../etc/passwd\" to /usr/bin/",
+            &base,
+            "work",
+            false,
+        )
+        .expect_err("escaping source must be refused without local:");
+        assert!(err.to_string().contains("may not escape"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_install_rejects_symlink_source() {
+        let dir = tmpdir("symlink");
+        let work = dir.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let base = dir.join("pkg");
+        fs::create_dir_all(&base).unwrap();
+
+        let secret = dir.join("secret.txt");
+        fs::write(&secret, b"sensitive data").unwrap();
+
+        let link = work.join("symlink_payload");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let line = "install -m644 \"symlink_payload\" to \"/usr/bin/\"";
+        let err = process_install_line(line, &base, work.to_str().unwrap(), false)
+            .expect_err("symlink source must be rejected");
+        assert!(err.to_string().contains("refusing to package a symlink"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_install_rejects_canonical_escape() {
+        let dir = tmpdir("escape");
+        let work = dir.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let base = dir.join("pkg");
+        fs::create_dir_all(&base).unwrap();
+
+        let outside_dir = dir.join("outside");
+        fs::create_dir_all(&outside_dir).unwrap();
+        let secret = outside_dir.join("secret.txt");
+        fs::write(&secret, b"sensitive data").unwrap();
+
+        // Symlink a directory
+        let sym_dir = work.join("sub");
+        std::os::unix::fs::symlink(&outside_dir, &sym_dir).unwrap();
+
+        let line = "install -m644 \"sub/secret.txt\" to \"/usr/bin/\"";
+        let err = process_install_line(line, &base, work.to_str().unwrap(), false)
+            .expect_err("canonical escape must be rejected");
+        assert!(err.to_string().contains("outside the work directory"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_chmod_package_refuses_to_delete_cwd() {
+        let metadata = Metadata {
+            name: "test".to_string(),
+            ..Default::default()
+        };
+        let err = chmod_package_with_metadata(&metadata, Path::new("."), false)
+            .expect_err("refuse to delete cwd");
+        assert!(err.to_string().contains("current or parent directory"));
+    }
+
+    #[test]
+    fn test_chmod_package_refuses_symlinked_base_dir() {
+        let dir = tmpdir("sym_base");
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let sym = dir.join("sym_staging");
+        std::os::unix::fs::symlink(&target, &sym).unwrap();
+
+        let metadata = Metadata {
+            name: "test".to_string(),
+            ..Default::default()
+        };
+        let err = chmod_package_with_metadata(&metadata, &sym, false)
+            .expect_err("refuse symlinked base dir");
+        assert!(err.to_string().contains("refusing to remove symlinked staging directory"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

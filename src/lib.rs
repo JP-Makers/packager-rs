@@ -1,3 +1,6 @@
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
 mod bundle;
 mod checksum;
 mod chmod;
@@ -5,36 +8,592 @@ mod clone;
 mod metadata;
 mod unpack;
 
-pub use bundle::linux::alpm::alpm_build;
-pub use bundle::linux::appimage::appimage_build;
-pub use bundle::linux::deb::deb_build;
-pub use bundle::linux::rpm::rpm_build;
-pub use checksum::verify_checksum;
-pub use chmod::chmod_package;
+pub use bundle::bsd::{build_freebsd, freebsd_package, FreeBSDDep, FreeBSDManifest};
+pub use bundle::linux::alpm::{alpm_build, alpm_package, alpm_package as build_alpm};
+pub use bundle::linux::appimage::{appimage_build, appimage_package, appimage_package as build_appimage};
+pub use bundle::linux::deb::{deb_build, deb_package, deb_package as build_deb};
+pub use bundle::linux::flatpak::{
+    flatpak_package, flatpak_package as build_flatpak, FlatpakApplication, FlatpakArchitecture,
+    FlatpakBuildSystem, FlatpakManifestFormat, FlatpakModule, FlatpakSource, FlatpakSourceType,
+};
+pub use bundle::linux::oci::{
+    build_oci_manifest, oci_package, oci_package as build_oci, OciConfig, OciDescriptor,
+    OciExecutionConfig, OciManifest, OciRootfs,
+};
+pub use bundle::keygen::{
+    default_key_dir, default_key_dir_for, generate_ed25519_keypair, generate_or_load_key,
+    generate_or_load_key_in, generate_zsync, parse_ed25519_armored_signature, run_keygen,
+    run_keygen_with_key_dir, sign_bytes, validate_ed25519_signature, verify_signature,
+    KeygenResults,
+};
+pub use bundle::linux::rpm::{rpm_build, rpm_package, rpm_package as build_rpm};
+pub use bundle::linux::snap::{snap_package, snap_package as build_snap};
+pub use bundle::macos::{build_dmg, dmg_package};
+pub use bundle::windows::{build_msi, build_nsis, msi_package, nsis_package};
+pub use checksum::{md5_hash, sha1_hash, sha256_hash, sha512_hash, verify_checksum, verify_checksum_value};
+#[allow(deprecated)]
+pub use chmod::{chmod_package, chmod_package_with_metadata};
 pub use clone::fetch_source;
-pub use metadata::Metadata;
+pub use metadata::{BuildPlatforms, Metadata, PlatformBuildConfig, PlatformTarget};
 pub use unpack::unpack_source;
 
-pub async fn build_package() -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = metadata::extract_metadata("metadata")?;
+/// Results containing paths to all packages built by `PackageBuilder`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuildResults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpm: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appimage: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deb: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snap: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flatpak: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dmg: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msi: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nsis: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freebsd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keygen: Option<KeygenResults>,
+}
 
-    for source in &metadata.sources {
-        let filename = fetch_source(source).await?;
+impl BuildResults {
+    /// Serialize results to a formatted JSON string.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
 
-        // Verify checksum BEFORE unpacking
-        verify_checksum(&metadata, &filename)?;
+    /// Deserialize results from a JSON string.
+    pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s)
+    }
 
-        // If it's an archive, unpack it
-        if filename.ends_with(".tar.gz")
-            || filename.ends_with(".tar.xz")
-            || filename.ends_with(".tar.bz2")
-            || filename.ends_with(".tar.zst")
-            || filename.ends_with(".tar")
-        {
-            unpack_source(&filename, &metadata.name)?;
-            //std::fs::remove_file(&filename)?;
+    /// Serialize results to a formatted YAML string.
+    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
+        serde_yaml::to_string(self)
+    }
+
+    /// Deserialize results from a YAML string.
+    pub fn from_yaml(s: &str) -> Result<Self, serde_yaml::Error> {
+        serde_yaml::from_str(s)
+    }
+
+    /// Serialize results to a formatted TOML string.
+    pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
+        toml::to_string_pretty(self)
+    }
+
+    /// Deserialize results from a TOML string.
+    pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(s)
+    }
+}
+
+/// High-level builder interface for orchestrating multi-distro Linux package creation.
+#[derive(Debug, Clone)]
+pub struct PackageBuilder {
+    pub metadata: Metadata,
+    pub output_dir: PathBuf,
+}
+
+/// Resolve a cleanup target and confirm it lives strictly inside `cwd`.
+///
+/// Kept separate from [`PackageBuilder::clean_workdir`] so the containment
+/// rule can be unit-tested without touching the process working directory.
+fn resolve_clean_target(
+    cwd: &Path,
+    target: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let resolved = target
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {:?} before removing it: {e}", target))?;
+
+    if resolved == cwd || !resolved.starts_with(cwd) {
+        return Err(format!(
+            "refusing to remove {:?}: it is not inside the working directory {:?}",
+            target, cwd
+        )
+        .into());
+    }
+
+    if resolved.parent().is_none() {
+        return Err(format!("refusing to remove root-like path: {:?}", target).into());
+    }
+
+    Ok(resolved)
+}
+
+impl PackageBuilder {
+    /// Create a new `PackageBuilder` with the given `Metadata`.
+    pub fn new(metadata: Metadata) -> Self {
+        Self {
+            metadata,
+            output_dir: PathBuf::from("output"),
         }
     }
 
-    Ok(())
+    /// Load metadata from a file path and create a `PackageBuilder`.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let metadata = Metadata::from_file(path)?;
+        Ok(Self::new(metadata))
+    }
+
+    /// Parse metadata from a string and create a `PackageBuilder` (also implements `std::str::FromStr`).
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let metadata = Metadata::from_str(s)?;
+        Ok(Self::new(metadata))
+    }
+
+    /// Set a custom output directory for built packages.
+    pub fn output_dir<P: AsRef<Path>>(mut self, path: P) -> Self {
+        self.output_dir = path.as_ref().to_path_buf();
+        self
+    }
+
+    /// Reference to the parsed metadata.
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+
+    /// Mutable reference to the parsed metadata.
+    pub fn metadata_mut(&mut self) -> &mut Metadata {
+        &mut self.metadata
+    }
+
+    /// Unpack an archive file into the target directory.
+    fn unpack_archive(filename: &str, workdir: &str) -> Result<(), Box<dyn std::error::Error>> {
+        unpack_source(filename, workdir)?;
+        Ok(())
+    }
+
+    /// Fetch and decompress all sources specified in metadata across top-level and platform configurations.
+    pub async fn fetch_and_unpack(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // 1. Fetch, verify, and unpack top-level sources
+        for (index, source) in self.metadata.sources.iter().enumerate() {
+            let filename = fetch_source(source).await?;
+            verify_checksum(&self.metadata, &filename, index)?;
+            Self::unpack_archive(&filename, self.metadata.workdir())?;
+        }
+
+        // 2. Fetch, verify, and unpack platform-specific sources (if defined in build)
+        if let Some(ref build) = self.metadata.build {
+            let platforms = [
+                (PlatformTarget::Linux, build.linux.as_ref()),
+                (PlatformTarget::Mac, build.mac.as_ref()),
+                (PlatformTarget::Windows, build.windows.as_ref()),
+                (PlatformTarget::FreeBsd, build.freebsd.as_ref()),
+            ];
+
+            for (target, cfg_opt) in platforms {
+                if let Some(cfg) = cfg_opt {
+                    let platform_meta = self.metadata.for_platform(target);
+                    for (index, source) in cfg.sources.iter().enumerate() {
+                        if self.metadata.sources.contains(source) {
+                            continue;
+                        }
+                        let filename = fetch_source(source).await?;
+                        verify_checksum(&platform_meta, &filename, index)?;
+                        Self::unpack_archive(&filename, platform_meta.workdir())?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Build an Arch Linux / ALPM package (`.pkg.tar.zst`).
+    pub fn alpm_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Linux);
+        alpm_package(&meta, &self.output_dir)
+    }
+
+    /// Build a standalone AppImage (`.AppImage`).
+    pub fn appimage_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Linux);
+        appimage_package(&meta, &self.output_dir)
+    }
+
+    /// Build a Debian / Ubuntu package (`.deb`).
+    pub fn deb_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Linux);
+        deb_package(&meta, &self.output_dir)
+    }
+
+    /// Build a Fedora / RHEL package (`.rpm`).
+    pub fn rpm_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Linux);
+        rpm_package(&meta, &self.output_dir)
+    }
+
+    /// Build a Canonical Snap package (`.snap`).
+    pub fn snap_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Linux);
+        snap_package(&meta, &self.output_dir)
+    }
+
+    /// Build a Flatpak package and manifest.
+    pub fn flatpak_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Linux);
+        flatpak_package(&meta, &self.output_dir)
+    }
+
+    /// Build a macOS Apple Disk Image (`.dmg`).
+    pub fn dmg_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Mac);
+        dmg_package(&meta, &self.output_dir)
+    }
+
+    /// Build a Windows Installer package (`.msi`).
+    pub fn msi_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Windows);
+        msi_package(&meta, &self.output_dir)
+    }
+
+    /// Build a Windows NSIS installer package (`.exe`).
+    pub fn nsis_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Windows);
+        nsis_package(&meta, &self.output_dir)
+    }
+
+    /// Build a FreeBSD binary package (`.pkg`).
+    pub fn freebsd_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::FreeBsd);
+        freebsd_package(&meta, &self.output_dir)
+    }
+
+    /// Build an OCI image manifest (`.oci-manifest.json`).
+    pub fn oci_package(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let meta = self.metadata.for_platform(PlatformTarget::Linux);
+        oci_package(&meta, &self.output_dir)
+    }
+
+    /// Backwards-compatible alias for `oci_package`.
+    pub fn build_oci(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.oci_package()
+    }
+
+    /// Backwards-compatible alias for `alpm_package`.
+    pub fn build_alpm(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.alpm_package()
+    }
+
+    /// Backwards-compatible alias for `appimage_package`.
+    pub fn build_appimage(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.appimage_package()
+    }
+
+    /// Backwards-compatible alias for `deb_package`.
+    pub fn build_deb(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.deb_package()
+    }
+
+    /// Backwards-compatible alias for `rpm_package`.
+    pub fn build_rpm(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.rpm_package()
+    }
+
+    /// Backwards-compatible alias for `snap_package`.
+    pub fn build_snap(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.snap_package()
+    }
+
+    /// Backwards-compatible alias for `flatpak_package`.
+    pub fn build_flatpak(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.flatpak_package()
+    }
+
+    /// Backwards-compatible alias for `dmg_package`.
+    pub fn build_dmg(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.dmg_package()
+    }
+
+    /// Backwards-compatible alias for `msi_package`.
+    pub fn build_msi(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.msi_package()
+    }
+
+    /// Backwards-compatible alias for `nsis_package`.
+    pub fn build_nsis(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.nsis_package()
+    }
+
+    /// Backwards-compatible alias for `freebsd_package`.
+    pub fn build_freebsd(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.freebsd_package()
+    }
+
+    /// Run keygen to sign packages, produce SHA256SUMS.txt, and export release signing key.
+    pub fn generate_keygen(&self, package_paths: &[PathBuf]) -> Result<KeygenResults, Box<dyn std::error::Error>> {
+        run_keygen(&self.metadata, &self.output_dir, package_paths)
+    }
+
+    /// Remove the unpacked work directory and any temporary build directories.
+    ///
+    /// Every path is resolved and confirmed to live inside the current working
+    /// directory before anything is removed. `workdir` and `name` come from
+    /// metadata, and a single `..` in either used to delete arbitrary
+    /// directories on the host.
+    pub fn clean_workdir(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = std::env::current_dir()?.canonicalize()?;
+
+        let mut targets: Vec<PathBuf> = self
+            .metadata
+            .all_workdirs()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        targets.push(PathBuf::from(&self.metadata.name));
+
+        for suffix in &[
+            ".alpm",
+            ".AppDir",
+            ".deb",
+            ".rpm",
+            ".snap-dir",
+            ".flatpak-dir",
+            ".dmg-dir",
+            ".msi-dir",
+            ".nsis-dir",
+            ".freebsd-dir",
+            ".oci-rootfs",
+        ] {
+            targets.push(PathBuf::from(format!("{}{}", self.metadata.name, suffix)));
+        }
+
+        for target in targets {
+            if !target.exists() {
+                continue;
+            }
+
+            let resolved = resolve_clean_target(&cwd, &target)?;
+
+            println!("Removing work directory: {}", target.display());
+            std::fs::remove_dir_all(&resolved)?;
+        }
+
+        Ok(())
+    }
+
+    /// Fetch sources, verify checksums, unpack, and build all package formats.
+    pub async fn build_all(&self) -> Result<BuildResults, Box<dyn std::error::Error>> {
+        self.fetch_and_unpack().await?;
+
+        let alpm = Some(self.alpm_package()?);
+        let appimage = Some(self.appimage_package()?);
+        let deb = Some(self.deb_package()?);
+        let rpm = Some(self.rpm_package()?);
+        let snap = Some(self.snap_package()?);
+        let flatpak = Some(self.flatpak_package()?);
+        let dmg = Some(self.dmg_package()?);
+        let msi = Some(self.msi_package()?);
+        let nsis = Some(self.nsis_package()?);
+        let freebsd = Some(self.freebsd_package()?);
+        let oci = Some(self.oci_package()?);
+
+        let keygen = if self.metadata.keygen {
+            let mut pkgs = Vec::new();
+            if let Some(ref p) = alpm { pkgs.push(p.clone()); }
+            if let Some(ref p) = appimage { pkgs.push(p.clone()); }
+            if let Some(ref p) = deb { pkgs.push(p.clone()); }
+            if let Some(ref p) = rpm { pkgs.push(p.clone()); }
+            if let Some(ref p) = snap { pkgs.push(p.clone()); }
+            if let Some(ref p) = flatpak { pkgs.push(p.clone()); }
+            if let Some(ref p) = dmg { pkgs.push(p.clone()); }
+            if let Some(ref p) = msi { pkgs.push(p.clone()); }
+            if let Some(ref p) = nsis { pkgs.push(p.clone()); }
+            if let Some(ref p) = freebsd { pkgs.push(p.clone()); }
+            if let Some(ref p) = oci { pkgs.push(p.clone()); }
+            Some(self.generate_keygen(&pkgs)?)
+        } else {
+            None
+        };
+
+        if self.metadata.clean_workdir {
+            self.clean_workdir()?;
+        }
+
+        Ok(BuildResults {
+            alpm,
+            appimage,
+            deb,
+            rpm,
+            snap,
+            flatpak,
+            dmg,
+            msi,
+            nsis,
+            freebsd,
+            oci,
+            keygen,
+        })
+    }
+}
+
+impl std::str::FromStr for PackageBuilder {
+    type Err = Box<dyn std::error::Error>;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let metadata = Metadata::from_str(s)?;
+        Ok(Self::new(metadata))
+    }
+}
+
+/// Convenience function to fetch and unpack sources from `./metadata.toml`.
+pub async fn build_package() -> Result<(), Box<dyn std::error::Error>> {
+    let builder = PackageBuilder::from_file("metadata.toml")?;
+    builder.fetch_and_unpack().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_build_results_serde_json() {
+        let results = BuildResults {
+            alpm: Some(PathBuf::from("dist/app_1.0_x86_64.pkg.tar.zst")),
+            appimage: Some(PathBuf::from("dist/app_1.0_x86_64.AppImage")),
+            deb: Some(PathBuf::from("dist/app_1.0_amd64.deb")),
+            rpm: Some(PathBuf::from("dist/app-1.0-1.x86_64.rpm")),
+            snap: Some(PathBuf::from("dist/app_1.0_amd64.snap")),
+            flatpak: Some(PathBuf::from("dist/app_1.0_x86_64.flatpak")),
+            dmg: Some(PathBuf::from("dist/app_1.0_x86_64.dmg")),
+            msi: Some(PathBuf::from("dist/app_1.0_x64.msi")),
+            nsis: Some(PathBuf::from("dist/app_1.0_x86_64_setup.exe")),
+            freebsd: Some(PathBuf::from("dist/app-1.0_1_amd64.pkg")),
+            oci: Some(PathBuf::from("dist/app-1.0-linux-x86_64.oci-manifest.json")),
+            keygen: None,
+        };
+
+        let json = results.to_json().expect("Should serialize BuildResults to JSON");
+        assert!(json.contains("app_1.0_amd64.snap"));
+        assert!(json.contains("app_1.0_x86_64.flatpak"));
+        assert!(json.contains("app_1.0_x86_64.dmg"));
+        assert!(json.contains("app_1.0_x64.msi"));
+        assert!(json.contains("app_1.0_x86_64_setup.exe"));
+        assert!(json.contains("app-1.0_1_amd64.pkg"));
+        assert!(json.contains("app-1.0-linux-x86_64.oci-manifest.json"));
+
+        let deserialized = BuildResults::from_json(&json).expect("Should deserialize BuildResults");
+        assert_eq!(deserialized.snap, results.snap);
+        assert_eq!(deserialized.flatpak, results.flatpak);
+        assert_eq!(deserialized.dmg, results.dmg);
+        assert_eq!(deserialized.msi, results.msi);
+        assert_eq!(deserialized.nsis, results.nsis);
+        assert_eq!(deserialized.freebsd, results.freebsd);
+        assert_eq!(deserialized.oci, results.oci);
+        assert_eq!(deserialized.deb, results.deb);
+    }
+
+    #[test]
+    fn test_build_results_serde_yaml() {
+        let results = BuildResults {
+            alpm: Some(PathBuf::from("dist/app_1.0_x86_64.pkg.tar.zst")),
+            appimage: Some(PathBuf::from("dist/app_1.0_x86_64.AppImage")),
+            deb: Some(PathBuf::from("dist/app_1.0_amd64.deb")),
+            rpm: Some(PathBuf::from("dist/app-1.0-1.x86_64.rpm")),
+            snap: Some(PathBuf::from("dist/app_1.0_amd64.snap")),
+            flatpak: Some(PathBuf::from("dist/app_1.0_x86_64.flatpak")),
+            dmg: Some(PathBuf::from("dist/app_1.0_x86_64.dmg")),
+            msi: Some(PathBuf::from("dist/app_1.0_x64.msi")),
+            nsis: Some(PathBuf::from("dist/app_1.0_x86_64_setup.exe")),
+            freebsd: Some(PathBuf::from("dist/app-1.0_1_amd64.pkg")),
+            oci: Some(PathBuf::from("dist/app-1.0-linux-x86_64.oci-manifest.json")),
+            keygen: None,
+        };
+
+        let yaml = results.to_yaml().expect("Should serialize BuildResults to YAML");
+        assert!(yaml.contains("snap: dist/app_1.0_amd64.snap"));
+        assert!(yaml.contains("flatpak: dist/app_1.0_x86_64.flatpak"));
+        assert!(yaml.contains("dmg: dist/app_1.0_x86_64.dmg"));
+        assert!(yaml.contains("msi: dist/app_1.0_x64.msi"));
+        assert!(yaml.contains("nsis: dist/app_1.0_x86_64_setup.exe"));
+        assert!(yaml.contains("freebsd: dist/app-1.0_1_amd64.pkg"));
+
+        let deserialized = BuildResults::from_yaml(&yaml).expect("Should deserialize BuildResults from YAML");
+        assert_eq!(deserialized.snap, results.snap);
+        assert_eq!(deserialized.flatpak, results.flatpak);
+        assert_eq!(deserialized.dmg, results.dmg);
+        assert_eq!(deserialized.msi, results.msi);
+        assert_eq!(deserialized.nsis, results.nsis);
+        assert_eq!(deserialized.freebsd, results.freebsd);
+        assert_eq!(deserialized.deb, results.deb);
+    }
+
+    #[test]
+    fn test_build_results_serde_toml() {
+        let results = BuildResults {
+            alpm: Some(PathBuf::from("dist/app_1.0_x86_64.pkg.tar.zst")),
+            appimage: Some(PathBuf::from("dist/app_1.0_x86_64.AppImage")),
+            deb: Some(PathBuf::from("dist/app_1.0_amd64.deb")),
+            rpm: Some(PathBuf::from("dist/app-1.0-1.x86_64.rpm")),
+            snap: Some(PathBuf::from("dist/app_1.0_amd64.snap")),
+            flatpak: Some(PathBuf::from("dist/app_1.0_x86_64.flatpak")),
+            dmg: Some(PathBuf::from("dist/app_1.0_x86_64.dmg")),
+            msi: Some(PathBuf::from("dist/app_1.0_x64.msi")),
+            nsis: Some(PathBuf::from("dist/app_1.0_x86_64_setup.exe")),
+            freebsd: Some(PathBuf::from("dist/app-1.0_1_amd64.pkg")),
+            oci: Some(PathBuf::from("dist/app-1.0-linux-x86_64.oci-manifest.json")),
+            keygen: None,
+        };
+
+        let toml_str = results.to_toml().expect("Should serialize BuildResults to TOML");
+        assert!(toml_str.contains("app_1.0_amd64.snap"));
+        assert!(toml_str.contains("app_1.0_x86_64.flatpak"));
+        assert!(toml_str.contains("app_1.0_x86_64.dmg"));
+        assert!(toml_str.contains("app_1.0_x64.msi"));
+
+        let deserialized = BuildResults::from_toml(&toml_str).expect("Should deserialize BuildResults from TOML");
+        assert_eq!(deserialized.snap, results.snap);
+        assert_eq!(deserialized.flatpak, results.flatpak);
+        assert_eq!(deserialized.dmg, results.dmg);
+        assert_eq!(deserialized.msi, results.msi);
+        assert_eq!(deserialized.nsis, results.nsis);
+        assert_eq!(deserialized.freebsd, results.freebsd);
+        assert_eq!(deserialized.deb, results.deb);
+    }
+
+    #[test]
+    fn test_cleanup_refuses_paths_outside_cwd() {
+        let root = std::env::temp_dir().join(format!("twincan-clean-{}", std::process::id()));
+        let inside = root.join("work");
+        let outside = root.parent().unwrap().join(format!(
+            "twincan-outside-{}",
+            std::process::id()
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let cwd = root.canonicalize().unwrap();
+
+        // Inside is allowed and returned canonically.
+        let ok = resolve_clean_target(&cwd, &inside).expect("inside path is allowed");
+        assert!(ok.starts_with(&cwd));
+
+        // Outside is refused.
+        let err = resolve_clean_target(&cwd, &outside)
+            .expect_err("outside path must be refused");
+        assert!(err.to_string().contains("not inside the working directory"));
+        assert!(outside.exists(), "refused path must not be touched");
+
+        // The working directory itself is refused.
+        assert!(resolve_clean_target(&cwd, &cwd).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
 }

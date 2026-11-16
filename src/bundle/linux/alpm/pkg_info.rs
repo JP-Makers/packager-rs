@@ -1,4 +1,4 @@
-use crate::metadata;
+use crate::metadata::Metadata;
 use alpm_types::MetadataFileName;
 use std::fs::File;
 use std::io::Write;
@@ -10,19 +10,33 @@ pub fn get_installed_size(input_path: impl AsRef<Path>) -> u64 {
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        if let Ok(metadata) = entry.metadata() {
-            if metadata.is_file() {
-                total_size += metadata.len();
-            }
+        if let Ok(metadata) = entry.metadata()
+            && metadata.is_file()
+        {
+            total_size += metadata.len();
         }
     }
     total_size
 }
 
-pub fn create_package_info(input_path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn create_package_info(
+    input_path: impl AsRef<Path>,
+    metadata: &Metadata,
+) -> Result<(), Box<dyn std::error::Error>> {
     let input_path = input_path.as_ref();
-    let mut file = File::create(&input_path.join(MetadataFileName::PackageInfo.as_ref()))?;
-    let metadata = metadata::extract_metadata("metadata")?;
+    let mut file = File::create(input_path.join(MetadataFileName::PackageInfo.as_ref()))?;
+
+    let mut dynamic_fields = String::new();
+    for conflict in &metadata.conflicts {
+        dynamic_fields.push_str(&format!("conflict = {}\n", conflict));
+    }
+    for provide in &metadata.provides {
+        dynamic_fields.push_str(&format!("provides = {}\n", provide));
+    }
+    for dep in &metadata.alpm_depends {
+        dynamic_fields.push_str(&format!("depend = {}\n", dep));
+    }
+
     write!(
         file,
         r#"pkgname = {}
@@ -36,10 +50,7 @@ packager = {} <{}>
 size = {}
 arch = {}
 license = {}
-conflict = {}
-provides = {}
-depend = {}
-"#,
+{}"#,
         metadata.name,
         metadata.name,
         metadata.version,
@@ -52,9 +63,7 @@ depend = {}
         get_installed_size(input_path),
         metadata.arch.first().unwrap_or(&"any".to_string()),
         metadata.license,
-        metadata.conflicts[0],
-        metadata.provides[0],
-        metadata.alpm_depends.join("\ndepend = ")
+        dynamic_fields
     )?;
     Ok(())
 }

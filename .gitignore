@@ -1,9 +1,43 @@
 /target
-/output
+/output/
+/dist/
+
+# --- secrets (never commit) -------------------------------------------------
+*.sec
+*.key
+*.pem
+release-signing-key.sec
+
+# --- package artifacts ------------------------------------------------------
 *.deb
 *.rpm
 *.AppImage
+*.AppImage.zsync
 *.squashfs
 *.tar.gz
+*.tar.xz
+*.tar.zst
 *.pkg.tar.zst
+*.pkg.tar.zst.sig
+*.snap
+*.flatpak
+*.flatpak.tar.gz
+*.dmg
+*.msi
+*.exe
+*.pkg
+*.oci
+*.oci.sig
+
+# --- generated metadata -----------------------------------------------------
+SHA256SUMS.txt
+SHA256SUMS.txt.asc
+*.asc
+*.sig
+
+# --- build trees ------------------------------------------------------------
 *.AppDir
+*-dir/
+
+# --- internal audit & planning ----------------------------------------------
+fix.md

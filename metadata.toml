@@ -1,0 +1,234 @@
+# =============================================================================
+# TwinCAN - package-builder metadata
+# =============================================================================
+# Read top to bottom. Every value here is used by at least one package format.
+#
+# Schema
+# ------
+# There are four optional platform tables: [build.linux], [build.mac],
+# [build.windows], and [build.freebsd]. Each may override sources, checksums,
+# arch, workdir, and package instructions. Per-format knobs (deb_depends,
+# snap_*, flatpak_*, win_*, ...) are TOP-LEVEL fields only; putting them under
+# [build.*] is silently ignored.
+#
+# Parser rules
+# ------------
+# * Quote any path that contains spaces (e.g., \"/Program Files/TwinCAN/\"). Inside a
+#   TOML basic string, quotes must be escaped: \"...\". An unquoted path
+#   with spaces is a hard error, not a silent misinstallation.
+# * A destination ending in "/" is treated as a directory and preserves the source filename.
+#   Without a trailing slash, the file is renamed to the destination name.
+# * sources[i] is strictly paired with sha256sums[i]. Never reorder one without the
+#   other. Do not use "SKIP": it disables integrity checking.
+# * `local:` is honored only inside install directives, never in `sources`.
+# * name and workdir must be plain names ([A-Za-z0-9._-], no "..", no "/").
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Identity
+# -----------------------------------------------------------------------------
+name = "twincan"
+version = "1.0.0"
+release = "1"
+maintainer = "JP-Makers"
+email = "contact@jp-makers.com"
+
+# Keep this under 79 characters: the same string is used as the Snap summary,
+# and snapd rejects summaries longer than 79 bytes. There is no separate
+# long-description field in this schema.
+description = "TwinCAN: CAN bus analysis, logging and simulation GUI."
+
+url = "https://github.com/JP-Makers/twincan"
+license = "MIT"
+
+# Linux vocabulary: x86_64, aarch64, riscv64, i686, armhf.
+arch = ["x86_64"]
+
+# -----------------------------------------------------------------------------
+# Sources and integrity
+# -----------------------------------------------------------------------------
+# Default for every platform that does not override them. The checksum below
+# matches the published Linux tarball and is verified before any unpacking.
+sources = [
+    "https://github.com/JP-Makers/twincan/releases/download/v1.0.0/TwinCAN.tar.gz",
+]
+
+# Supported checksum formats (provide at least one format matching the sources array):
+# 1. SHA-256 (64 hex characters - standard and recommended)
+sha256sums = [
+    "a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4",
+]
+
+# 2. SHA-512 (128 hex characters)
+sha512sums = []
+
+# 3. SHA-1 (40 hex characters)
+sha1sums = []
+
+# 4. MD5 (32 hex characters)
+md5sums = []
+
+# Sources are unpacked into workdir. The tarball's own top-level directory is
+# TwinCAN/, so payload files end up at twincan/TwinCAN/.
+workdir = "twincan"
+
+# false keeps the unpacked tree so a failed build can be inspected. Set true
+# only in disposable CI checkouts: it deletes the work directory after building.
+clean_workdir = false
+
+# -----------------------------------------------------------------------------
+# Package relations
+# -----------------------------------------------------------------------------
+provides = ["twincan"]
+conflicts = []
+
+# -----------------------------------------------------------------------------
+# Runtime dependencies (one list per package format)
+# -----------------------------------------------------------------------------
+# Arch: qt6-base ships Qt6 Core/Gui/Widgets/Network.
+alpm_depends = ["qt6-base"]
+
+# Arch Linux .BUILDINFO build environment flags
+alpm_build_env = ["!distcc", "color", "!ccache", "check", "!sign"]
+
+# Debian/Ubuntu runtime libraries. Do not use -dev packages here.
+deb_depends = ["libqt6widgets6", "libqt6gui6", "libqt6network6"]
+
+# Fedora/RHEL. qt6-qtbase-gui pulls in the rest of qt6-qtbase.
+rpm_depends = ["qt6-qtbase-gui"]
+
+# FreeBSD ports origin, not a package filename.
+freebsd_depends = ["devel/qt6-base"]
+
+# -----------------------------------------------------------------------------
+# AppImage
+# -----------------------------------------------------------------------------
+appimage_exec = "/usr/bin/TwinCAN"
+appimage_icon = ["install -m644 \"TwinCAN/TwinCAN.svg\" to /"]
+appimage_desktop = ["install -m644 \"TwinCAN/TwinCAN.desktop\" to /"]
+
+# -----------------------------------------------------------------------------
+# Snap
+# -----------------------------------------------------------------------------
+# Under strict confinement, the snap requires hardware plugs (raw-usb,
+# hardware-observe, and network-control) to communicate with CAN adapters.
+snap_confinement = "strict"
+snap_base = "core22"
+snap_grade = "stable"
+
+# -----------------------------------------------------------------------------
+# Flatpak
+# -----------------------------------------------------------------------------
+# Generates Freedesktop Flatpak application manifests (<id>.json), .flatpakref,
+# and /app hierarchy ready for flatpak-builder and Flathub.
+flatpak_id = "org.jpmakers.twincan"
+flatpak_runtime = "org.freedesktop.Platform"
+flatpak_runtime_version = "24.08"
+flatpak_sdk = "org.freedesktop.Sdk"
+
+# -----------------------------------------------------------------------------
+# macOS
+# -----------------------------------------------------------------------------
+mac_bundle_id = "org.jpmakers.twincan"
+mac_category = "public.app-category.developer-tools"
+mac_min_system_version = "11.0"
+
+# Optional macOS icon path (.icns, .png, or .svg). If empty, auto-detected from payload.
+mac_icon = ""
+
+# -----------------------------------------------------------------------------
+# Windows
+# -----------------------------------------------------------------------------
+win_manufacturer = "JP-Makers"
+win_install_dir = "TwinCAN"
+win_install_scope = "perMachine"
+
+# UpgradeCode must stay identical across every release, forever.
+win_upgrade_code = "B92E8704-5899-44F4-A02F-43FF201CE08A"
+
+# ProductCode is intentionally left empty. The builder derives a deterministic
+# GUID from manufacturer + name + version, ensuring each version gets its own
+# ProductCode for major upgrades.
+win_product_code = ""
+
+win_desktop_shortcut = true
+win_program_menu_shortcut = true
+
+# Optional Windows installer icon (.ico) and NSIS 24-bit bitmaps (.bmp).
+# If empty, default built-in artwork or payload icons are automatically located.
+win_icon = ""
+win_header = ""
+win_wizard = ""
+
+# -----------------------------------------------------------------------------
+# FreeBSD
+# -----------------------------------------------------------------------------
+freebsd_origin = "devel/twincan"
+freebsd_categories = ["devel", "sysutils"]
+freebsd_prefix = "/usr/local"
+freebsd_abi = ""
+
+# -----------------------------------------------------------------------------
+# Release signing
+# -----------------------------------------------------------------------------
+# Off by default. With keygen = true, every build generates or reuses an Ed25519
+# OpenPGP keypair and signs all package artifacts in the output directory.
+# Use `-k/--keygen` via CLI for release builds.
+keygen = false
+
+# Optional path to an existing ASCII-armored private key (.sec or .asc).
+# If omitted, keys are cached under $XDG_CONFIG_HOME/packager/<app>/keys/.
+keygen_key = ""
+
+# -----------------------------------------------------------------------------
+# Default (Linux) filesystem layout
+# -----------------------------------------------------------------------------
+# The desktop entry contains Icon=/usr/share/icons/TwinCAN/TwinCAN.svg, so the
+# icon installation path below must not be changed unless the .desktop file is
+# updated at the same time.
+package = [
+    "install -m755 \"TwinCAN/TwinCAN\" to /usr/bin/",
+    "install -m644 \"TwinCAN/TwinCAN.desktop\" to /usr/share/applications/",
+    "install -m644 \"TwinCAN/TwinCAN.svg\" to /usr/share/icons/TwinCAN/",
+    "install -m644 \"TwinCAN/LICENSE\" to /usr/share/licenses/twincan/",
+]
+
+# =============================================================================
+# Platform overrides
+# [build.linux] is intentionally absent: Linux is identical to the defaults.
+#
+# Note: The macOS and Windows sections below package the Linux payload until
+# real Darwin/Windows pre-compiled archives and checksums are provided.
+# =============================================================================
+
+[build.mac]
+# A DMG holds one architecture; a universal bundle requires a universal binary.
+arch = ["x86_64"]
+# Example: Darwin archive override:
+#   sources    = ["https://github.com/JP-Makers/twincan/releases/download/v1.0.0/TwinCAN-macos-x86_64.tar.gz"]
+#   sha256sums = ["<sha256>"]
+package = [
+    "install -m755 \"TwinCAN/TwinCAN\" to /Applications/TwinCAN.app/Contents/MacOS/",
+    "install -m644 \"TwinCAN/TwinCAN.svg\" to /Applications/TwinCAN.app/Contents/Resources/",
+    "install -m644 \"TwinCAN/LICENSE\" to /Applications/TwinCAN.app/Contents/Resources/",
+]
+
+[build.windows]
+# When sources are omitted, the verified top-level sources are reused.
+# Example: Windows archive override:
+#   sources    = ["https://github.com/JP-Makers/twincan/releases/download/v1.0.0/TwinCAN-windows-x64.zip"]
+#   sha256sums = ["<sha256>"]
+arch = ["x64"]
+package = [
+    "install -m755 \"TwinCAN/TwinCAN\" to \"/Program Files/TwinCAN/\"",
+    "install -m644 \"TwinCAN/LICENSE\" to \"/Program Files/TwinCAN/\"",
+]
+
+[build.freebsd]
+arch = ["amd64"]
+package = [
+    "install -m755 \"TwinCAN/TwinCAN\" to /usr/local/bin/",
+    "install -m644 \"TwinCAN/TwinCAN.desktop\" to /usr/local/share/applications/",
+    "install -m644 \"TwinCAN/TwinCAN.svg\" to /usr/local/share/icons/TwinCAN/",
+    "install -m644 \"TwinCAN/LICENSE\" to /usr/local/share/licenses/twincan/",
+]

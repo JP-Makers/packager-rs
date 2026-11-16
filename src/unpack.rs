@@ -1,33 +1,35 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use liblzma::read::XzDecoder;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io;
 use std::path::Path;
 use tar::Archive;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 pub fn unpack_source(path: &str, dest: &str) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
     let file = File::open(path)?;
     let extension = Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_lowercase();
 
-    println!("Unpacking {}...", path);
+    println!("Unpacking {} into {}...", path, dest);
 
-    match extension {
-        "gz" => {
+    match extension.as_str() {
+        "gz" | "tgz" => {
             let decoder = GzDecoder::new(file);
             let mut archive = Archive::new(decoder);
             archive.unpack(dest)?;
         }
-        "xz" => {
+        "xz" | "txz" => {
             let decoder = XzDecoder::new(file);
             let mut archive = Archive::new(decoder);
             archive.unpack(dest)?;
         }
-        "bz2" => {
+        "bz2" | "tbz2" => {
             let decoder = BzDecoder::new(file);
             let mut archive = Archive::new(decoder);
             archive.unpack(dest)?;
@@ -44,7 +46,7 @@ pub fn unpack_source(path: &str, dest: &str) -> io::Result<()> {
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("Unsupported extension: {}", extension),
+                    format!("Unsupported archive extension: {}", extension),
                 ));
             }
         }
