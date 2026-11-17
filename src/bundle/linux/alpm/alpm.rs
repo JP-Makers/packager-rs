@@ -1,14 +1,22 @@
-use super::build_info::create_build_info;
-use super::normalize::normalize_alpm_package;
-use super::pkg_info::create_package_info;
-use crate::chmod::chmod_package_with_metadata;
-use crate::metadata::{self, Metadata};
-
-use alpm_compress::compression::CompressionSettings;
-use alpm_mtree::create_mtree_v2_from_input_dir;
-use alpm_package::{InputDir, OutputDir, Package, PackageCreationConfig, PackageInput};
+use crate::metadata::Metadata;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
+use super::build_info::create_build_info;
+#[cfg(target_os = "linux")]
+use super::normalize::normalize_alpm_package;
+#[cfg(target_os = "linux")]
+use super::pkg_info::create_package_info;
+#[cfg(target_os = "linux")]
+use crate::chmod::chmod_package_with_metadata;
+#[cfg(target_os = "linux")]
+use alpm_compress::compression::CompressionSettings;
+#[cfg(target_os = "linux")]
+use alpm_mtree::create_mtree_v2_from_input_dir;
+#[cfg(target_os = "linux")]
+use alpm_package::{InputDir, OutputDir, Package, PackageCreationConfig, PackageInput};
+
+#[cfg(target_os = "linux")]
 pub fn alpm_package(
     metadata: &Metadata,
     output_dir: &Path,
@@ -52,11 +60,7 @@ pub fn alpm_package(
     let package_path = output_dir.join(package_filename);
 
     if !package_path.is_file() {
-        return Err(format!(
-            "ALPM package was not created at {}",
-            package_path.display()
-        )
-        .into());
+        return Err(format!("ALPM package was not created at {}", package_path.display()).into());
     }
 
     // `Package::try_from` archives the build user's uid/gid (1000/1000) and
@@ -74,9 +78,10 @@ pub fn alpm_package(
     Ok(package_path)
 }
 
-pub fn alpm_build() -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = metadata::extract_metadata("metadata.toml")?;
-    let output_dir = std::env::current_dir()?.join("output");
-    alpm_package(&metadata, &output_dir)?;
-    Ok(())
+#[cfg(not(target_os = "linux"))]
+pub fn alpm_package(
+    _metadata: &Metadata,
+    _output_dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Err("ALPM package creation is only supported on Linux hosts due to alpm-mtree kernel dependencies".into())
 }

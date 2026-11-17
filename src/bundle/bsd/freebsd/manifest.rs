@@ -162,17 +162,23 @@ mod tests {
         let manifest = FreeBSDManifest::from_metadata(&metadata, 10240, files, true);
 
         // Test +MANIFEST
-        let full_json = manifest.to_manifest_json().expect("full manifest should serialize");
+        let full_json = manifest
+            .to_manifest_json()
+            .expect("full manifest should serialize");
         assert!(full_json.contains("\"name\": \"sample-app\""));
         assert!(full_json.contains("\"origin\": \"sysutils/sample-app\""));
         assert!(full_json.contains("\"abi\": \"FreeBSD:14:amd64\""));
         assert!(full_json.contains("\"arch\": \"freebsd:14:x86:64\""));
         assert!(full_json.contains("/usr/local/bin/sample-app"));
-        assert!(full_json.contains("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+        assert!(
+            full_json.contains("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
         assert!(full_json.contains("post-install"));
 
         // Test +COMPACT_MANIFEST
-        let compact_json = manifest.to_compact_json().expect("compact manifest should serialize");
+        let compact_json = manifest
+            .to_compact_json()
+            .expect("compact manifest should serialize");
         assert!(compact_json.contains("\"name\": \"sample-app\""));
         assert!(!compact_json.contains("files"));
         assert!(!compact_json.contains("post-install"));
@@ -183,4 +189,3 @@ mod tests {
         assert!(desc.contains("WWW: https://example.com/app"));
     }
 }
-

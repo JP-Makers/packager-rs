@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bundle::linux::appimage::squashfs::squashfs_build;
 use crate::chmod::chmod_package_with_metadata;
-use crate::metadata::{self, Metadata};
+use crate::metadata::Metadata;
 
 static RUNTIME_X86_64: &[u8] = include_bytes!("apprun/runtime-x86_64");
 static RUNTIME_AARCH64: &[u8] = include_bytes!("apprun/runtime-aarch64");
@@ -55,7 +55,7 @@ pub fn appimage_package(
                 && (ext == "svg" || ext == "png")
                 && path.is_file()
             {
-                let _ = std::fs::copy(&path, &dir_icon_path);
+                std::fs::copy(&path, &dir_icon_path)?;
                 break;
             }
         }
@@ -146,11 +146,4 @@ exec "$HERE{}" "$@"
     println!("  Location: {}", output_appimage_path.display());
 
     Ok(output_appimage_path)
-}
-
-pub fn appimage_build() -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = metadata::extract_metadata("metadata.toml")?;
-    let output_dir = std::env::current_dir()?.join("output");
-    appimage_package(&metadata, &output_dir)?;
-    Ok(())
 }

@@ -71,8 +71,11 @@ impl std::fmt::Display for PlatformTarget {
 }
 
 /// Platform-specific build configuration allowing custom sources, checksums, arch, workdir, and package instructions.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformBuildConfig {
+    /// Set to `false` to skip this platform during `build_all` and to refuse an explicit build.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub sources: Vec<String>,
     #[serde(default)]
@@ -89,6 +92,26 @@ pub struct PlatformBuildConfig {
     pub workdir: Option<String>,
     #[serde(default, alias = "package")]
     pub package_instructions: Vec<String>,
+}
+
+impl Default for PlatformBuildConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sources: Vec::new(),
+            sha256sums: Vec::new(),
+            sha512sums: Vec::new(),
+            sha1sums: Vec::new(),
+            md5sums: Vec::new(),
+            arch: Vec::new(),
+            workdir: None,
+            package_instructions: Vec::new(),
+        }
+    }
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Container for platform-specific build tables: `[build.linux]`, `[build.mac]`, `[build.windows]`, and `[build.freebsd]`.
@@ -154,7 +177,6 @@ fn default_true() -> bool {
     true
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Metadata {
     #[serde(default)]
@@ -205,6 +227,14 @@ pub struct Metadata {
     pub appimage_icon_instructions: Vec<String>,
     #[serde(default, alias = "appimage_desktop")]
     pub appimage_desktop_instructions: Vec<String>,
+    /// SHA-256 hash of the input metadata specification (`metadata.toml`).
+    ///
+    /// ALPM packages in this ecosystem are built declaratively from `metadata.toml`
+    /// rather than an Arch Linux PKGBUILD script; this hash is written into the ALPM
+    /// `.BUILDINFO` `pkgbuild_sha256sum` field.
+    #[serde(default)]
+    pub metadata_sha256sum: String,
+    /// Backwards-compatible alias for `metadata_sha256sum`.
     #[serde(default)]
     pub pkgbuild_sha256sum: String,
     #[serde(default)]
@@ -245,10 +275,6 @@ pub struct Metadata {
     pub win_install_scope: String,
     #[serde(default)]
     pub win_icon: String,
-    #[serde(default)]
-    pub win_header: String,
-    #[serde(default)]
-    pub win_wizard: String,
     #[serde(default = "default_true")]
     pub win_desktop_shortcut: bool,
     #[serde(default = "default_true")]
@@ -304,6 +330,7 @@ impl Default for Metadata {
             package_instructions: Vec::new(),
             appimage_icon_instructions: Vec::new(),
             appimage_desktop_instructions: Vec::new(),
+            metadata_sha256sum: String::new(),
             pkgbuild_sha256sum: String::new(),
             clean_workdir: false,
             workdir: None,
@@ -324,8 +351,6 @@ impl Default for Metadata {
             win_install_dir: String::new(),
             win_install_scope: "perMachine".to_string(),
             win_icon: String::new(),
-            win_header: String::new(),
-            win_wizard: String::new(),
             win_desktop_shortcut: true,
             win_program_menu_shortcut: true,
             freebsd_depends: Vec::new(),
@@ -375,10 +400,9 @@ fn is_safe_filename_part(value: &str) -> bool {
 
 fn validate_filename_part(field: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
     if !is_safe_filename_part(value) {
-        return Err(format!(
-            "{field} may not contain path separators or be empty, got {value:?}"
-        )
-        .into());
+        return Err(
+            format!("{field} may not contain path separators or be empty, got {value:?}").into(),
+        );
     }
     Ok(())
 }
@@ -406,7 +430,10 @@ fn validate_checksum_list(
     }
     for sum in checksums {
         if sum.eq_ignore_ascii_case("SKIP") {
-            return Err(format!("{kind} contains 'SKIP': checksum bypass is forbidden for security").into());
+            return Err(format!(
+                "{kind} contains 'SKIP': checksum bypass is forbidden for security"
+            )
+            .into());
         }
         if sum.len() != expected_len || !sum.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!(
@@ -436,10 +463,9 @@ fn validate_source_checksums(
         || !md5sums.is_empty();
 
     if !has_any {
-        return Err(format!(
-            "No package checksums found for {context} sources ({sources:?})"
-        )
-        .into());
+        return Err(
+            format!("No package checksums found for {context} sources ({sources:?})").into(),
+        );
     }
 
     if !sha256sums.is_empty() {
@@ -489,11 +515,12 @@ impl Metadata {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        let pkgbuild_sha256sum = hex::encode(hasher.finalize());
+        let hash = hex::encode(hasher.finalize());
 
         let text = std::str::from_utf8(bytes)?;
         let mut meta: Metadata = toml::from_str(text)?;
-        meta.pkgbuild_sha256sum = pkgbuild_sha256sum;
+        meta.metadata_sha256sum = hash.clone();
+        meta.pkgbuild_sha256sum = hash;
         meta.validate()?;
         Ok(meta)
     }
@@ -540,7 +567,9 @@ impl Metadata {
                 || self.email.starts_with('@')
                 || self.email.ends_with('@')
             {
-                return Err(format!("email must be a valid email address, got {:?}", self.email).into());
+                return Err(
+                    format!("email must be a valid email address, got {:?}", self.email).into(),
+                );
             }
         }
 
@@ -564,6 +593,13 @@ impl Metadata {
             return Err("Package url not found".into());
         }
         validate_single_line("url", &self.url)?;
+        if !self.url.starts_with("http://") && !self.url.starts_with("https://") {
+            return Err(format!(
+                "url must start with http:// or https://, got {:?}",
+                self.url
+            )
+            .into());
+        }
 
         if self.license.is_empty() {
             return Err("Package license not found".into());
@@ -606,12 +642,17 @@ impl Metadata {
         validate_single_line("win_install_dir", &self.win_install_dir)?;
         validate_single_line("win_install_scope", &self.win_install_scope)?;
         validate_single_line("win_icon", &self.win_icon)?;
-        validate_single_line("win_header", &self.win_header)?;
-        validate_single_line("win_wizard", &self.win_wizard)?;
         validate_single_line("freebsd_origin", &self.freebsd_origin)?;
         validate_single_line("freebsd_prefix", &self.freebsd_prefix)?;
         validate_single_line("freebsd_abi", &self.freebsd_abi)?;
         validate_single_line("keygen_key", &self.keygen_key)?;
+        if !self.keygen_key.is_empty() && !Path::new(&self.keygen_key).exists() {
+            return Err(format!(
+                "configured keygen_key does not exist: {:?}",
+                self.keygen_key
+            )
+            .into());
+        }
 
         // Identifiers that become paths or file names.
         validate_component("name", &self.name)?;
@@ -640,6 +681,23 @@ impl Metadata {
         let all_srcs = self.all_sources();
         if all_srcs.is_empty() {
             return Err("Package sources not found".into());
+        }
+
+        for src in &all_srcs {
+            if src.starts_with("http://")
+                || src.starts_with("https://")
+                || src.starts_with("file://")
+            {
+                // Valid remote or file URI scheme
+            } else if Path::new(src).exists() {
+                // Valid local existing file
+            } else {
+                return Err(format!(
+                    "source must be an http://, https://, or file:// URL, or an existing local file, got {:?}",
+                    src
+                )
+                .into());
+            }
         }
 
         // Validate top-level checksums if sources are present
@@ -746,46 +804,59 @@ impl Metadata {
             }
         }
         let mut seen = std::collections::HashSet::new();
-        dirs.into_iter().filter(|s| seen.insert(s.clone())).collect()
+        dirs.into_iter()
+            .filter(|s| seen.insert(s.clone()))
+            .collect()
     }
 
     /// Produce a specialized `Metadata` for a specific platform target, overriding
     /// sources, checksums, arch, workdir, and package instructions if specified under `[build.<platform>]`.
+    /// Return the platform-specific build table for a target, if one is defined.
+    fn platform_build_config(&self, target: PlatformTarget) -> Option<&PlatformBuildConfig> {
+        self.build.as_ref().and_then(|build| match target {
+            PlatformTarget::Linux => build.linux.as_ref(),
+            PlatformTarget::Mac => build.mac.as_ref(),
+            PlatformTarget::Windows => build.windows.as_ref(),
+            PlatformTarget::FreeBsd => build.freebsd.as_ref(),
+        })
+    }
+
+    /// Whether the given platform target is enabled for builds.
+    ///
+    /// A missing `[build.<platform>]` table keeps the historical behaviour of
+    /// being enabled; only an explicit `enabled = false` disables a target.
+    pub fn platform_enabled(&self, target: PlatformTarget) -> bool {
+        self.platform_build_config(target)
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(true)
+    }
+
     pub fn for_platform(&self, target: PlatformTarget) -> Metadata {
         let mut platform_meta = self.clone();
-        if let Some(ref build) = self.build {
-            let platform_config = match target {
-                PlatformTarget::Linux => build.linux.as_ref(),
-                PlatformTarget::Mac => build.mac.as_ref(),
-                PlatformTarget::Windows => build.windows.as_ref(),
-                PlatformTarget::FreeBsd => build.freebsd.as_ref(),
-            };
-
-            if let Some(cfg) = platform_config {
-                if !cfg.sources.is_empty() {
-                    platform_meta.sources = cfg.sources.clone();
-                }
-                if !cfg.sha256sums.is_empty() {
-                    platform_meta.sha256sums = cfg.sha256sums.clone();
-                }
-                if !cfg.sha512sums.is_empty() {
-                    platform_meta.sha512sums = cfg.sha512sums.clone();
-                }
-                if !cfg.sha1sums.is_empty() {
-                    platform_meta.sha1sums = cfg.sha1sums.clone();
-                }
-                if !cfg.md5sums.is_empty() {
-                    platform_meta.md5sums = cfg.md5sums.clone();
-                }
-                if !cfg.arch.is_empty() {
-                    platform_meta.arch = cfg.arch.clone();
-                }
-                if cfg.workdir.is_some() {
-                    platform_meta.workdir = cfg.workdir.clone();
-                }
-                if !cfg.package_instructions.is_empty() {
-                    platform_meta.package_instructions = cfg.package_instructions.clone();
-                }
+        if let Some(cfg) = self.platform_build_config(target) {
+            if !cfg.sources.is_empty() {
+                platform_meta.sources = cfg.sources.clone();
+            }
+            if !cfg.sha256sums.is_empty() {
+                platform_meta.sha256sums = cfg.sha256sums.clone();
+            }
+            if !cfg.sha512sums.is_empty() {
+                platform_meta.sha512sums = cfg.sha512sums.clone();
+            }
+            if !cfg.sha1sums.is_empty() {
+                platform_meta.sha1sums = cfg.sha1sums.clone();
+            }
+            if !cfg.md5sums.is_empty() {
+                platform_meta.md5sums = cfg.md5sums.clone();
+            }
+            if !cfg.arch.is_empty() {
+                platform_meta.arch = cfg.arch.clone();
+            }
+            if cfg.workdir.is_some() {
+                platform_meta.workdir = cfg.workdir.clone();
+            }
+            if !cfg.package_instructions.is_empty() {
+                platform_meta.package_instructions = cfg.package_instructions.clone();
             }
         }
         platform_meta
@@ -867,7 +938,11 @@ impl Metadata {
         if !self.freebsd_origin.is_empty() {
             return self.freebsd_origin.clone();
         }
-        let category = self.freebsd_categories.first().map(|s| s.as_str()).unwrap_or("devel");
+        let category = self
+            .freebsd_categories
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("devel");
         format!("{}/{}", category, self.name)
     }
 
@@ -1036,7 +1111,6 @@ impl Metadata {
         }
     }
 
-
     /// Serialize metadata to a TOML string.
     pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
         toml::to_string_pretty(self)
@@ -1046,10 +1120,11 @@ impl Metadata {
     pub fn from_toml(toml_str: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let mut hasher = Sha256::new();
         hasher.update(toml_str.as_bytes());
-        let pkgbuild_sha256sum = hex::encode(hasher.finalize());
+        let hash = hex::encode(hasher.finalize());
 
         let mut meta: Metadata = toml::from_str(toml_str)?;
-        meta.pkgbuild_sha256sum = pkgbuild_sha256sum;
+        meta.metadata_sha256sum = hash.clone();
+        meta.pkgbuild_sha256sum = hash;
         meta.validate()?;
         Ok(meta)
     }
@@ -1091,36 +1166,15 @@ pub fn extract_metadata(metadata_path: &str) -> Result<Metadata, Box<dyn std::er
     Metadata::from_file(metadata_path)
 }
 
-#[allow(dead_code)]
-pub fn print_metadata(metadata_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = extract_metadata(metadata_path)?;
-
-    println!("Package: {}", metadata.name);
-    println!("Version: {}", metadata.version);
-    println!("Release: {}", metadata.release);
-    println!("Maintainer: {}", metadata.maintainer);
-    println!("Description: {}", metadata.description);
-    println!("Arch: {:?}", metadata.arch);
-    println!("URL: {}", metadata.url);
-    println!("License: {}", metadata.license);
-    println!("ALPM Depends: {:?}", metadata.alpm_depends);
-    println!("DEB Depends: {:?}", metadata.deb_depends);
-    println!("RPM Depends: {:?}", metadata.rpm_depends);
-    println!("Provides: {:?}", metadata.provides);
-    println!("Conflicts: {:?}", metadata.conflicts);
-    println!("Sources: {:?}", metadata.sources);
-    println!("SHA256SUMS: {:?}", metadata.sha256sums);
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_parse_metadata_file() {
-        let meta = Metadata::from_file("metadata.toml").expect("Should parse default metadata.toml file");
+        let meta =
+            Metadata::from_file("metadata.toml").expect("Should parse default metadata.toml file");
         assert_eq!(meta.name, "twincan");
         assert_eq!(meta.deb_arch(), "amd64");
         assert_eq!(meta.rpm_arch(), "x86_64");
@@ -1257,7 +1311,16 @@ snap_grade = "devel"
 
     #[test]
     fn test_keygen_metadata_parsing() {
-        let raw1 = r#"
+        let tmp = std::env::temp_dir().join(format!(
+            "test_keygen_meta_{}",
+            uuid::Uuid::new_v4().hyphenated()
+        ));
+        let _ = fs::create_dir_all(&tmp);
+        let key_path = tmp.join("key.sec");
+        let _ = fs::write(&key_path, b"dummy secret key");
+
+        let raw1 = format!(
+            r#"
 name = "keygentest1"
 version = "1.0.0"
 release = "1"
@@ -1270,13 +1333,16 @@ license = "MIT"
 sources = ["https://example.com/test.tar.gz"]
 sha256sums = ["a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4"]
 keygen = true
-keygen_key = "/custom/path/key.sec"
-"#;
-        let meta1 = Metadata::from_str(raw1).expect("parse metadata with keygen: true");
+keygen_key = "{}"
+"#,
+            key_path.display()
+        );
+        let meta1 = Metadata::from_str(&raw1).expect("parse metadata with keygen: true");
         assert!(meta1.keygen);
-        assert_eq!(meta1.keygen_key, "/custom/path/key.sec");
+        assert_eq!(meta1.keygen_key, key_path.to_string_lossy());
 
-        let raw2 = r#"
+        let raw2 = format!(
+            r#"
 name = "keygentest2"
 version = "1.0.0"
 release = "1"
@@ -1289,11 +1355,14 @@ license = "MIT"
 sources = ["https://example.com/test.tar.gz"]
 sha256sums = ["a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4"]
 keygen = true
-keygen_key = "/custom/path/key.asc"
-"#;
-        let meta2 = Metadata::from_str(raw2).expect("parse metadata with keygen = true");
+keygen_key = "{}"
+"#,
+            key_path.display()
+        );
+        let meta2 = Metadata::from_str(&raw2).expect("parse metadata with keygen = true");
         assert!(meta2.keygen);
-        assert_eq!(meta2.keygen_key, "/custom/path/key.asc");
+        assert_eq!(meta2.keygen_key, key_path.to_string_lossy());
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -1342,21 +1411,33 @@ workdir = "twincan-bsd"
 
         // Platform specialization
         let linux_meta = meta.for_platform(PlatformTarget::Linux);
-        assert_eq!(linux_meta.sources, vec!["https://example.com/twincan-linux.tar.gz"]);
+        assert_eq!(
+            linux_meta.sources,
+            vec!["https://example.com/twincan-linux.tar.gz"]
+        );
         assert_eq!(linux_meta.workdir(), "twincan-linux");
 
         let mac_meta = meta.for_platform(PlatformTarget::Mac);
-        assert_eq!(mac_meta.sources, vec!["https://example.com/twincan-mac.tar.gz"]);
+        assert_eq!(
+            mac_meta.sources,
+            vec!["https://example.com/twincan-mac.tar.gz"]
+        );
         assert_eq!(mac_meta.workdir(), "twincan-mac");
         assert_eq!(mac_meta.arch, vec!["arm64", "x86_64"]);
 
         let win_meta = meta.for_platform(PlatformTarget::Windows);
-        assert_eq!(win_meta.sources, vec!["https://example.com/twincan-win.tar.gz"]);
+        assert_eq!(
+            win_meta.sources,
+            vec!["https://example.com/twincan-win.tar.gz"]
+        );
         assert_eq!(win_meta.workdir(), "twincan-win");
         assert_eq!(win_meta.arch, vec!["x64"]);
 
         let bsd_meta = meta.for_platform(PlatformTarget::FreeBsd);
-        assert_eq!(bsd_meta.sources, vec!["https://example.com/twincan-bsd.tar.gz"]);
+        assert_eq!(
+            bsd_meta.sources,
+            vec!["https://example.com/twincan-bsd.tar.gz"]
+        );
         assert_eq!(bsd_meta.workdir(), "twincan-bsd");
         assert_eq!(bsd_meta.arch, vec!["amd64"]);
 
@@ -1365,7 +1446,8 @@ workdir = "twincan-bsd"
         assert!(serialized.contains("twincan-linux.tar.gz"));
         assert!(serialized.contains("[build.linux]"));
 
-        let deserialized = Metadata::from_toml(&serialized).expect("Should re-deserialize from TOML");
+        let deserialized =
+            Metadata::from_toml(&serialized).expect("Should re-deserialize from TOML");
         assert_eq!(deserialized.name, meta.name);
         assert_eq!(deserialized.sources, meta.sources);
 
@@ -1455,7 +1537,8 @@ sha256sums = ["a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4"
             r#"description = "Test application""#,
             &format!("description = \"{long_desc}\""),
         );
-        let err = Metadata::from_str(&raw).expect_err("description over 79 characters must be rejected");
+        let err =
+            Metadata::from_str(&raw).expect_err("description over 79 characters must be rejected");
         assert!(err.to_string().contains("79 characters"), "{err}");
     }
 
@@ -1466,7 +1549,10 @@ sha256sums = ["a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4"
             r#"sha256sums = ["a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4", "a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4"]"#,
         );
         let err = Metadata::from_str(&raw).expect_err("checksum count mismatch must be rejected");
-        assert!(err.to_string().contains("does not match sources count"), "{err}");
+        assert!(
+            err.to_string().contains("does not match sources count"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1494,5 +1580,46 @@ sha256sums = ["a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4"
         let raw = valid_toml(r#"email = "invalid-email-no-at""#);
         let err = Metadata::from_str(&raw).expect_err("invalid email must be rejected");
         assert!(err.to_string().contains("email"), "{err}");
+    }
+
+    #[test]
+    fn test_source_scheme_is_validated() {
+        let raw = valid_toml("").replace(
+            r#"sources = ["https://example.com/twincan.tar.gz"]"#,
+            r#"sources = ["ftp://example.com/twincan.tar.gz"]"#,
+        );
+        let err = Metadata::from_str(&raw).expect_err("non-http/non-file source scheme must fail");
+        assert!(err.to_string().contains("source must be"), "{err}");
+
+        let raw_nonexistent_local = valid_toml("").replace(
+            r#"sources = ["https://example.com/twincan.tar.gz"]"#,
+            r#"sources = ["nonexistent_local_file.tar.gz"]"#,
+        );
+        let err = Metadata::from_str(&raw_nonexistent_local)
+            .expect_err("missing local file source must fail");
+        assert!(err.to_string().contains("source must be"), "{err}");
+    }
+
+    #[test]
+    fn test_keygen_key_is_validated() {
+        let raw = valid_toml(r#"keygen_key = "/nonexistent/path/to/key.sec""#);
+        let err = Metadata::from_str(&raw).expect_err("nonexistent keygen_key must fail");
+        assert!(
+            err.to_string().contains("keygen_key does not exist"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_url_is_validated() {
+        let raw = valid_toml("").replace(
+            r#"url = "https://example.com/twincan""#,
+            r#"url = "ftp://example.com/twincan""#,
+        );
+        let err = Metadata::from_str(&raw).expect_err("non-http url must fail");
+        assert!(
+            err.to_string().contains("url must start with http"),
+            "{err}"
+        );
     }
 }

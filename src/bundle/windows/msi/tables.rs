@@ -3,7 +3,15 @@
 use msi::{Column, Insert, Package, Value};
 use std::io::{Read, Seek, Write};
 
-pub type ShortcutRecord<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str, Option<&'a str>);
+pub type ShortcutRecord<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    &'a str,
+);
 
 pub struct TableSetup;
 
@@ -158,7 +166,9 @@ impl TableSetup {
             Column::build("Feature").primary_key().id_string(38),
             Column::build("Feature_Parent").nullable().id_string(38),
             Column::build("Title").nullable().formatted_string(64),
-            Column::build("Description").nullable().formatted_string(255),
+            Column::build("Description")
+                .nullable()
+                .formatted_string(255),
             Column::build("Display").nullable().int16(),
             Column::build("Level").int16(),
             Column::build("Directory_").nullable().id_string(72),
@@ -212,7 +222,9 @@ impl TableSetup {
             Column::build("Component_").id_string(72),
             Column::build("Target").formatted_string(72),
             Column::build("Arguments").nullable().formatted_string(255),
-            Column::build("Description").nullable().formatted_string(255),
+            Column::build("Description")
+                .nullable()
+                .formatted_string(255),
             Column::build("Hotkey").nullable().int16(),
             Column::build("Icon_").nullable().id_string(72),
             Column::build("IconIndex").nullable().int16(),
@@ -222,7 +234,7 @@ impl TableSetup {
         pkg.create_table("Shortcut", columns)?;
 
         let mut insert = Insert::into("Shortcut");
-        for &(sc_id, dir, name, comp, target, icon) in shortcuts {
+        for &(sc_id, dir, name, comp, target, icon, workdir) in shortcuts {
             let (icon_val, icon_idx) = match icon {
                 Some(ic) => (Value::from(ic), Value::from(0i16)),
                 None => (Value::Null, Value::Null),
@@ -239,7 +251,7 @@ impl TableSetup {
                 icon_val,
                 icon_idx,
                 Value::Null,
-                Value::from("INSTALLFOLDER"),
+                Value::from(workdir),
             ]);
         }
         pkg.insert_rows(insert)?;

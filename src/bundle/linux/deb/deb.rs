@@ -1,7 +1,7 @@
 use crate::bundle::linux::alpm::pkg_info::get_installed_size;
 use crate::bundle::linux::archive;
 use crate::chmod::chmod_package_with_metadata;
-use crate::metadata::{self, Metadata};
+use crate::metadata::Metadata;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use md5::{Digest, Md5};
@@ -113,12 +113,7 @@ pub fn deb_package(
 
     for (abs_path, rel_path) in &data_files {
         if abs_path.is_file() {
-            archive::append_file(
-                &mut tar,
-                abs_path,
-                rel_path,
-                archive::file_mode(abs_path),
-            )?;
+            archive::append_file(&mut tar, abs_path, rel_path, archive::file_mode(abs_path))?;
         } else if abs_path.is_dir() {
             archive::append_dir(&mut tar, abs_path, rel_path)?;
         }
@@ -138,7 +133,12 @@ pub fn deb_package(
     let control_tar_gz = File::create(&control_tar_gz_path)?;
     let enc = GzEncoder::new(control_tar_gz, Compression::default());
     let mut tar = Builder::new(enc);
-    archive::append_file(&mut tar, &debian_dir.join("control"), Path::new("control"), 0o644)?;
+    archive::append_file(
+        &mut tar,
+        &debian_dir.join("control"),
+        Path::new("control"),
+        0o644,
+    )?;
     archive::append_file(&mut tar, &md5sums_path, Path::new("md5sums"), 0o644)?;
 
     if has_desktop_or_icons {
@@ -208,13 +208,6 @@ fi\n"
     }
 
     Ok(deb_file_path)
-}
-
-pub fn deb_build() -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = metadata::extract_metadata("metadata.toml")?;
-    let output_dir = std::env::current_dir()?.join("output");
-    deb_package(&metadata, &output_dir)?;
-    Ok(())
 }
 
 fn add_file_to_ar<W: Write>(ar: &mut ar::Builder<W>, path: &Path, name: &str) -> io::Result<()> {

@@ -7,7 +7,7 @@ pub fn crc32(data: &[u8]) -> u32 {
     for &byte in data {
         crc ^= byte as u32;
         for _ in 0..8 {
-            let mask = -( (crc & 1) as i32 ) as u32;
+            let mask = -((crc & 1) as i32) as u32;
             crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
         }
     }
@@ -20,8 +20,16 @@ pub fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
-        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
 
         out.push(CHARSET[b0 >> 2] as char);
         out.push(CHARSET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
@@ -97,48 +105,96 @@ pub fn create_udif_plist(volume_name: &str, mish_bytes: &[u8]) -> Vec<u8> {
         writer
             .write(XmlEvent::start_element("plist").attr("version", "1.0"))
             .expect("Failed plist start");
-        writer.write(XmlEvent::start_element("dict")).expect("Failed dict");
+        writer
+            .write(XmlEvent::start_element("dict"))
+            .expect("Failed dict");
 
-        writer.write(XmlEvent::start_element("key")).expect("Failed key");
-        writer.write(XmlEvent::characters("resource-fork")).expect("Failed chars");
+        writer
+            .write(XmlEvent::start_element("key"))
+            .expect("Failed key");
+        writer
+            .write(XmlEvent::characters("resource-fork"))
+            .expect("Failed chars");
         writer.write(XmlEvent::end_element()).expect("Failed end");
 
-        writer.write(XmlEvent::start_element("dict")).expect("Failed dict");
+        writer
+            .write(XmlEvent::start_element("dict"))
+            .expect("Failed dict");
 
-        writer.write(XmlEvent::start_element("key")).expect("Failed key");
-        writer.write(XmlEvent::characters("blkx")).expect("Failed chars");
-        writer.write(XmlEvent::end_element()).expect("Failed end");
-
-        writer.write(XmlEvent::start_element("array")).expect("Failed array");
-
-        writer.write(XmlEvent::start_element("dict")).expect("Failed dict");
-
-        writer.write(XmlEvent::start_element("key")).expect("Failed key");
-        writer.write(XmlEvent::characters("Attributes")).expect("Failed chars");
-        writer.write(XmlEvent::end_element()).expect("Failed end");
-        writer.write(XmlEvent::start_element("string")).expect("Failed string");
-        writer.write(XmlEvent::characters("0x00000000")).expect("Failed chars");
+        writer
+            .write(XmlEvent::start_element("key"))
+            .expect("Failed key");
+        writer
+            .write(XmlEvent::characters("blkx"))
+            .expect("Failed chars");
         writer.write(XmlEvent::end_element()).expect("Failed end");
 
-        writer.write(XmlEvent::start_element("key")).expect("Failed key");
-        writer.write(XmlEvent::characters("Data")).expect("Failed chars");
+        writer
+            .write(XmlEvent::start_element("array"))
+            .expect("Failed array");
+
+        writer
+            .write(XmlEvent::start_element("dict"))
+            .expect("Failed dict");
+
+        writer
+            .write(XmlEvent::start_element("key"))
+            .expect("Failed key");
+        writer
+            .write(XmlEvent::characters("Attributes"))
+            .expect("Failed chars");
         writer.write(XmlEvent::end_element()).expect("Failed end");
-        writer.write(XmlEvent::start_element("data")).expect("Failed data");
-        writer.write(XmlEvent::characters(&mish_b64)).expect("Failed chars");
+        writer
+            .write(XmlEvent::start_element("string"))
+            .expect("Failed string");
+        writer
+            .write(XmlEvent::characters("0x00000000"))
+            .expect("Failed chars");
         writer.write(XmlEvent::end_element()).expect("Failed end");
 
-        writer.write(XmlEvent::start_element("key")).expect("Failed key");
-        writer.write(XmlEvent::characters("ID")).expect("Failed chars");
+        writer
+            .write(XmlEvent::start_element("key"))
+            .expect("Failed key");
+        writer
+            .write(XmlEvent::characters("Data"))
+            .expect("Failed chars");
         writer.write(XmlEvent::end_element()).expect("Failed end");
-        writer.write(XmlEvent::start_element("string")).expect("Failed string");
-        writer.write(XmlEvent::characters("-1")).expect("Failed chars");
+        writer
+            .write(XmlEvent::start_element("data"))
+            .expect("Failed data");
+        writer
+            .write(XmlEvent::characters(&mish_b64))
+            .expect("Failed chars");
         writer.write(XmlEvent::end_element()).expect("Failed end");
 
-        writer.write(XmlEvent::start_element("key")).expect("Failed key");
-        writer.write(XmlEvent::characters("Name")).expect("Failed chars");
+        writer
+            .write(XmlEvent::start_element("key"))
+            .expect("Failed key");
+        writer
+            .write(XmlEvent::characters("ID"))
+            .expect("Failed chars");
         writer.write(XmlEvent::end_element()).expect("Failed end");
-        writer.write(XmlEvent::start_element("string")).expect("Failed string");
-        writer.write(XmlEvent::characters(volume_name)).expect("Failed chars");
+        writer
+            .write(XmlEvent::start_element("string"))
+            .expect("Failed string");
+        writer
+            .write(XmlEvent::characters("-1"))
+            .expect("Failed chars");
+        writer.write(XmlEvent::end_element()).expect("Failed end");
+
+        writer
+            .write(XmlEvent::start_element("key"))
+            .expect("Failed key");
+        writer
+            .write(XmlEvent::characters("Name"))
+            .expect("Failed chars");
+        writer.write(XmlEvent::end_element()).expect("Failed end");
+        writer
+            .write(XmlEvent::start_element("string"))
+            .expect("Failed string");
+        writer
+            .write(XmlEvent::characters(volume_name))
+            .expect("Failed chars");
         writer.write(XmlEvent::end_element()).expect("Failed end");
 
         // Close dict, array, dict, dict, plist

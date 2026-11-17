@@ -1,5 +1,5 @@
 use clap::Parser;
-use package_builder::PackageBuilder;
+use packager_rs::{PackageBuilder, PlatformTarget};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "package-builder",
     version,
-    about = "Unified, multi-format package bundler (Debian, AppImage, RPM, Arch Linux, Snap, Flatpak, macOS DMG, Windows MSI/NSIS, FreeBSD PKG)"
+    about = "Unified, multi-format package bundler (Debian, AppImage, RPM, Arch Linux, Snap, Flatpak, macOS DMG, Windows MSI, FreeBSD PKG)"
 )]
 struct Cli {
     /// Path to the metadata file
@@ -49,10 +49,6 @@ struct Cli {
     /// Build Windows Installer (.msi) package
     #[arg(short = 'w', long)]
     msi: bool,
-
-    /// Build Windows NSIS installer (.exe) and Modern UI 2 script package
-    #[arg(short = 'n', long)]
-    nsis: bool,
 
     /// Build FreeBSD package (.pkg)
     #[arg(short = 'b', long)]
@@ -117,30 +113,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metadata_path = cli.metadata;
 
     println!("Loading metadata from: {}", metadata_path.display());
-    let builder = PackageBuilder::from_file(&metadata_path)?
-        .output_dir(&cli.output);
+    let builder = PackageBuilder::from_file(&metadata_path)?.output_dir(&cli.output);
 
-    // If check flag is provided, only fetch, unpack, and verify checksums
+    // If check flag is provided, validate metadata and existing local sources without mutating work tree
     if cli.check {
-        println!("Validating metadata and verifying sources for {} v{}...", builder.metadata.name, builder.metadata.version);
-        builder.fetch_and_unpack().await?;
-        println!("Metadata, sources, and checksums verified successfully!");
+        println!(
+            "Validating metadata and verifying sources for {} v{}...",
+            builder.metadata.name, builder.metadata.version
+        );
+        builder.check()?;
+        println!("Metadata and local sources verified successfully!");
         return Ok(());
     }
 
     // Determine target formats to build
-    let build_all = cli.all || (!cli.deb && !cli.appimage && !cli.rpm && !cli.alpm && !cli.snap && !cli.flatpak && !cli.dmg && !cli.msi && !cli.nsis && !cli.freebsd && !cli.oci);
-    let build_deb = build_all || cli.deb;
-    let build_appimage = build_all || cli.appimage;
-    let build_rpm = build_all || cli.rpm;
-    let build_alpm = build_all || cli.alpm;
-    let build_snap = build_all || cli.snap;
-    let build_flatpak = build_all || cli.flatpak;
-    let build_dmg = build_all || cli.dmg;
-    let build_msi = build_all || cli.msi;
-    let build_nsis = build_all || cli.nsis;
-    let build_freebsd = build_all || cli.freebsd;
-    let build_oci = build_all || cli.oci;
+    let build_all = cli.all
+        || (!cli.deb
+            && !cli.appimage
+            && !cli.rpm
+            && !cli.alpm
+            && !cli.snap
+            && !cli.flatpak
+            && !cli.dmg
+            && !cli.msi
+            && !cli.freebsd
+            && !cli.oci);
+
+    let linux_enabled = builder.metadata.platform_enabled(PlatformTarget::Linux);
+    let mac_enabled = builder.metadata.platform_enabled(PlatformTarget::Mac);
+    let windows_enabled = builder.metadata.platform_enabled(PlatformTarget::Windows);
+    let freebsd_enabled = builder.metadata.platform_enabled(PlatformTarget::FreeBsd);
+
+    if build_all {
+        for (target, enabled) in [
+            (PlatformTarget::Linux, linux_enabled),
+            (PlatformTarget::Mac, mac_enabled),
+            (PlatformTarget::Windows, windows_enabled),
+            (PlatformTarget::FreeBsd, freebsd_enabled),
+        ] {
+            if !enabled {
+                println!("Skipping platform '{target}': [build.{target}] enabled = false");
+            }
+        }
+    }
+
+    // Disabled platforms are skipped during a default/all build. An explicit
+    // flag still reaches the gated builder and fails with a clear error.
+    let build_deb = (build_all && linux_enabled) || cli.deb;
+    let build_appimage = (build_all && linux_enabled) || cli.appimage;
+    let build_rpm = (build_all && linux_enabled) || cli.rpm;
+    let build_alpm = (build_all && linux_enabled) || cli.alpm;
+    let build_snap = (build_all && linux_enabled) || cli.snap;
+    let build_flatpak = (build_all && linux_enabled) || cli.flatpak;
+    let build_dmg = (build_all && mac_enabled) || cli.dmg;
+    let build_msi = (build_all && windows_enabled) || cli.msi;
+    let build_freebsd = (build_all && freebsd_enabled) || cli.freebsd;
+    let build_oci = (build_all && linux_enabled) || cli.oci;
 
     println!(
         "Building packages for {} v{}...",
@@ -183,10 +211,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if build_msi {
         let p = builder.msi_package()?;
         generated.push(("Windows MSI", p));
-    }
-    if build_nsis {
-        let p = builder.nsis_package()?;
-        generated.push(("Windows NSIS", p));
     }
     if build_freebsd {
         let p = builder.freebsd_package()?;

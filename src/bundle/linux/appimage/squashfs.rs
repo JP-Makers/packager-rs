@@ -7,7 +7,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::{fs, path::Path};
 use walkdir::WalkDir;
 
-pub fn squashfs_build_to_file(app_dir: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn squashfs_build_to_file(
+    app_dir: &str,
+    output_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !Path::new(app_dir).exists() {
         return Err(format!("Directory {} not found", app_dir).into());
     }
@@ -27,10 +30,7 @@ pub fn squashfs_build_to_file(app_dir: &str, output_path: &Path) -> Result<(), B
     fs_writer.set_root_gid(0);
     fs_writer.set_root_mode(0o755);
 
-    println!(
-        "Converting {} to SquashFS (level 20)...",
-        app_dir
-    );
+    println!("Converting {} to SquashFS (level 20)...", app_dir);
 
     let dir_header = NodeHeader::new(0o755, 0, 0, 0);
     let symlink_header = NodeHeader::new(0o777, 0, 0, 0);

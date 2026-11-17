@@ -5,7 +5,9 @@ use super::cab::{CabFileEntry, create_cabinet};
 use super::tables::{ShortcutRecord, TableSetup};
 use crate::chmod::chmod_package_with_metadata;
 use crate::metadata::Metadata;
+use crate::payload::is_pe;
 use msi::Package;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use std::io::Write;
@@ -18,6 +20,8 @@ struct StagedFile {
     comp_id: String,
     comp_uuid: String,
     filename: String,
+    rel_path: String,
+    dir_id: String,
     data: Vec<u8>,
     is_main_exe: bool,
 }
@@ -92,48 +96,63 @@ pub fn msi_package(
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
     {
-            for entry in entries {
-                if entry.file_type().is_file() {
-                    let path = entry.path();
-                    let rel = path
-                        .strip_prefix(&staged_dir)
-                        .unwrap_or(path)
-                        .to_string_lossy()
-                        .to_string();
-                    let filename = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let data = fs::read(path)?;
+        let mut staged: Vec<(String, PathBuf)> = entries
+            .into_iter()
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                let path = entry.into_path();
+                let rel = path
+                    .strip_prefix(&staged_dir)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                (rel, path)
+            })
+            .collect();
+        // WalkDir ordering is filesystem-dependent; sort so the component
+        // UUIDs, file sequence numbers, and cabinet entries are stable.
+        staged.sort_by(|a, b| a.0.cmp(&b.0));
 
-                    let is_main = filename == exec_name
-                        || filename == format!("{}.exe", exec_name)
-                        || filename == metadata.name
-                        || filename == format!("{}.exe", metadata.name);
+        for (rel, path) in staged {
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let data = fs::read(&path)?;
 
-                    let idx = files_to_package.len();
-                    let file_id = format!("fil_{:04}", idx);
-                    let comp_id = format!("cmp_{:04}", idx);
+            let is_main = rel == format!("usr/bin/{exec_name}")
+                || rel == format!("bin/{exec_name}")
+                || rel == exec_name
+                || filename == exec_name
+                || filename == format!("{}.exe", exec_name)
+                || filename == metadata.name
+                || filename == format!("{}.exe", metadata.name);
 
-                    let seed = format!("{}:{}", win_upgrade_uuid, rel);
-                    let comp_uuid = format!(
-                        "{{{}}}",
-                        Uuid::new_v5(&Uuid::NAMESPACE_DNS, seed.as_bytes()).hyphenated()
-                    )
-                    .to_ascii_uppercase();
+            let idx = files_to_package.len();
+            let file_id = format!("fil_{:04}", idx);
+            let comp_id = format!("cmp_{:04}", idx);
 
-                    files_to_package.push(StagedFile {
-                        file_id,
-                        comp_id,
-                        comp_uuid,
-                        filename,
-                        data,
-                        is_main_exe: is_main,
-                    });
-                }
-            }
+            let seed = format!("{}:{}", win_upgrade_uuid, rel);
+            let comp_uuid = format!(
+                "{{{}}}",
+                Uuid::new_v5(&Uuid::NAMESPACE_DNS, seed.as_bytes()).hyphenated()
+            )
+            .to_ascii_uppercase();
+
+            files_to_package.push(StagedFile {
+                file_id,
+                comp_id,
+                comp_uuid,
+                filename,
+                rel_path: rel,
+                // Filled in once the full directory set is known.
+                dir_id: "INSTALLFOLDER".to_string(),
+                data,
+                is_main_exe: is_main,
+            });
         }
+    }
 
     // Fallback: check workdir if staged directory did not yield any files
     if files_to_package.is_empty() {
@@ -150,7 +169,11 @@ pub fn msi_package(
             if c.is_file()
                 && let Ok(data) = fs::read(c)
             {
-                let filename = c.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let filename = c
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 found_candidate = Some((filename, data));
                 break;
             }
@@ -159,9 +182,11 @@ pub fn msi_package(
         let (filename, data) = match found_candidate {
             Some(pair) => pair,
             None => {
-                // Generate a lightweight stub binary payload if none exists
-                let fn_str = format!("{}.exe", exec_name);
-                (fn_str, b"MZ\x90\x00\x03\x00\x00\x00PureRustMSIPayload".to_vec())
+                return Err(format!(
+                    "refusing to build MSI: no Windows executable found in {staged_dir:?} or workdir {:?}",
+                    metadata.workdir()
+                )
+                .into());
             }
         };
 
@@ -176,17 +201,62 @@ pub fn msi_package(
             file_id: "fil_0000".to_string(),
             comp_id: "cmp_0000".to_string(),
             comp_uuid,
+            rel_path: filename.clone(),
             filename,
+            dir_id: "INSTALLFOLDER".to_string(),
             data,
             is_main_exe: true,
         });
     }
 
-    // Ensure at least one file is designated as main executable for shortcut targeting
+    // Build the Directory table from the staged relative paths. Each file's
+    // Component points at its immediate parent so `bin/app.exe` and
+    // `share/app.exe` no longer collide in one flat INSTALLFOLDER.
+    let mut dir_paths: BTreeSet<String> = BTreeSet::new();
+    for file in &files_to_package {
+        let mut parent = Path::new(&file.rel_path).parent();
+        while let Some(dir) = parent {
+            let key = dir.to_string_lossy().replace('\\', "/");
+            if key.is_empty() {
+                break;
+            }
+            dir_paths.insert(key);
+            parent = dir.parent();
+        }
+    }
+
+    let mut dir_ids: BTreeMap<String, String> = BTreeMap::new();
+    for (index, path) in dir_paths.iter().enumerate() {
+        dir_ids.insert(path.clone(), format!("dir_{:04}", index));
+    }
+
+    for file in &mut files_to_package {
+        file.dir_id = Path::new(&file.rel_path)
+            .parent()
+            .map(|parent| parent.to_string_lossy().replace('\\', "/"))
+            .filter(|parent| !parent.is_empty())
+            .and_then(|parent| dir_ids.get(&parent).cloned())
+            .unwrap_or_else(|| "INSTALLFOLDER".to_string());
+    }
+
+    // Ensure at least one file is designated as main executable for shortcut
+    // targeting. Prefer a real PE image, then refuse a wrong-platform payload.
     if !files_to_package.iter().any(|f| f.is_main_exe)
-        && let Some(first) = files_to_package.first_mut()
+        && let Some(idx) = files_to_package.iter().position(|f| is_pe(&f.data))
     {
-        first.is_main_exe = true;
+        files_to_package[idx].is_main_exe = true;
+    }
+
+    let main = files_to_package
+        .iter()
+        .find(|f| f.is_main_exe)
+        .ok_or("refusing to build MSI: no Windows PE executable found in the staged payload")?;
+    if !is_pe(&main.data) {
+        return Err(format!(
+            "refusing to build MSI: {:?} is not a Windows PE executable; supply a Windows payload for [build.windows]",
+            main.filename
+        )
+        .into());
     }
 
     // Locate optional icon
@@ -297,20 +367,76 @@ pub fn msi_package(
         "ProgramFilesFolder"
     };
 
-    let mut dirs: Vec<(&str, Option<&str>, &str)> = vec![
-        ("TARGETDIR", None, "SourceDir"),
-        (program_files_dir, Some("TARGETDIR"), if is_64bit { ".:ProgFiles64" } else { ".:ProgFiles" }),
-        ("ManufacturerFolder", Some(program_files_dir), &manufacturer_str),
-        ("INSTALLFOLDER", Some("ManufacturerFolder"), &install_dir_str),
+    let mut dirs_owned: Vec<(String, Option<String>, String)> = vec![
+        ("TARGETDIR".to_string(), None, "SourceDir".to_string()),
+        (
+            program_files_dir.to_string(),
+            Some("TARGETDIR".to_string()),
+            if is_64bit {
+                ".:ProgFiles64".to_string()
+            } else {
+                ".:ProgFiles".to_string()
+            },
+        ),
+        (
+            "ManufacturerFolder".to_string(),
+            Some(program_files_dir.to_string()),
+            manufacturer_str.clone(),
+        ),
+        (
+            "INSTALLFOLDER".to_string(),
+            Some("ManufacturerFolder".to_string()),
+            install_dir_str.clone(),
+        ),
     ];
 
+    // One row per staged directory, wired to its immediate parent.
+    // Sorted by depth so parents always precede children in the Directory table.
+    let mut sorted_dir_paths: Vec<String> = dir_paths.into_iter().collect();
+    sorted_dir_paths.sort_by_key(|p| (p.matches('/').count(), p.clone()));
+
+    for path in &sorted_dir_paths {
+        let id = dir_ids
+            .get(path)
+            .cloned()
+            .expect("every directory path has an id");
+        let parent = Path::new(path)
+            .parent()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .filter(|p| !p.is_empty())
+            .and_then(|p| dir_ids.get(&p).cloned())
+            .unwrap_or_else(|| "INSTALLFOLDER".to_string());
+        let default_dir = Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        dirs_owned.push((id, Some(parent), default_dir));
+    }
+
     if metadata.win_program_menu_shortcut {
-        dirs.push(("ProgramMenuFolder", Some("TARGETDIR"), ".:Programs"));
-        dirs.push(("AppMenuFolder", Some("ProgramMenuFolder"), &app_name_str));
+        dirs_owned.push((
+            "ProgramMenuFolder".to_string(),
+            Some("TARGETDIR".to_string()),
+            ".:Programs".to_string(),
+        ));
+        dirs_owned.push((
+            "AppMenuFolder".to_string(),
+            Some("ProgramMenuFolder".to_string()),
+            app_name_str.clone(),
+        ));
     }
     if metadata.win_desktop_shortcut {
-        dirs.push(("DesktopFolder", Some("TARGETDIR"), ".:Desktop"));
+        dirs_owned.push((
+            "DesktopFolder".to_string(),
+            Some("TARGETDIR".to_string()),
+            ".:Desktop".to_string(),
+        ));
     }
+
+    let dirs: Vec<(&str, Option<&str>, &str)> = dirs_owned
+        .iter()
+        .map(|(id, parent, default_dir)| (id.as_str(), parent.as_deref(), default_dir.as_str()))
+        .collect();
 
     TableSetup::setup_directory_table(&mut pkg, &dirs)?;
 
@@ -322,7 +448,7 @@ pub fn msi_package(
             (
                 f.comp_id.as_str(),
                 f.comp_uuid.as_str(),
-                "INSTALLFOLDER",
+                f.dir_id.as_str(),
                 comp_attrs,
                 Some(f.file_id.as_str()),
             )
@@ -359,7 +485,10 @@ pub fn msi_package(
         &metadata.description,
     )?;
 
-    let comp_ids: Vec<&str> = files_to_package.iter().map(|f| f.comp_id.as_str()).collect();
+    let comp_ids: Vec<&str> = files_to_package
+        .iter()
+        .map(|f| f.comp_id.as_str())
+        .collect();
     TableSetup::setup_feature_components_table(&mut pkg, "Complete", &comp_ids)?;
 
     // 8. Configure Shortcut Table
@@ -384,6 +513,7 @@ pub fn msi_package(
             &main_exe.comp_id,
             &target_ref,
             icon_ref,
+            &main_exe.dir_id,
         ));
     }
     if metadata.win_desktop_shortcut {
@@ -394,6 +524,7 @@ pub fn msi_package(
             &main_exe.comp_id,
             &target_ref,
             icon_ref,
+            &main_exe.dir_id,
         ));
     }
 
@@ -434,11 +565,29 @@ pub fn msi_package(
 mod tests {
     use super::*;
 
+    fn pe_payload() -> Vec<u8> {
+        let mut bytes = vec![0u8; 0x80];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        bytes[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
+        bytes
+    }
+
+    fn write_payload(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
     #[test]
     fn test_msi_package_creation() {
         let tmp = std::env::temp_dir().join(format!("test_msi_{}", Uuid::new_v4().hyphenated()));
         let out_dir = tmp.join("out");
+        let work_dir = tmp.join("work");
         fs::create_dir_all(&out_dir).unwrap();
+        write_payload(&work_dir, "testapp.exe", &pe_payload());
 
         let metadata = Metadata {
             name: "testapp".to_string(),
@@ -449,6 +598,7 @@ mod tests {
             arch: vec!["x86_64".to_string()],
             url: "https://example.com".to_string(),
             license: "MIT".to_string(),
+            workdir: Some(work_dir.to_string_lossy().to_string()),
             win_upgrade_code: "{11111111-2222-3333-4444-555555555555}".to_string(),
             win_product_code: "{66666666-7777-8888-9999-AAAAAAAAAAAA}".to_string(),
             win_manufacturer: "Acme Corporation".to_string(),
@@ -481,6 +631,117 @@ mod tests {
         assert!(pkg.has_stream("Data1.cab"));
 
         // Clean up
+        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(format!("{}.msi-dir", metadata.name));
+    }
+
+    #[test]
+    fn test_msi_rejects_non_pe_payload() {
+        let tmp =
+            std::env::temp_dir().join(format!("test_msi_elf_{}", Uuid::new_v4().hyphenated()));
+        let work_dir = tmp.join("work");
+        write_payload(&work_dir, "elfapp.exe", b"\x7fELF\x02\x01\x01");
+
+        let metadata = Metadata {
+            name: "elfapp".to_string(),
+            version: "1.0.0".to_string(),
+            maintainer: "Test".to_string(),
+            workdir: Some(work_dir.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let out_dir = tmp.join("out");
+        let err =
+            msi_package(&metadata, &out_dir).expect_err("a non-PE payload must not produce an MSI");
+        assert!(
+            err.to_string().contains("not a Windows PE executable"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !out_dir.join("elfapp_1.0.0_x64.msi").exists(),
+            "no MSI may be written for a rejected payload"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(format!("{}.msi-dir", metadata.name));
+    }
+
+    #[test]
+    fn test_msi_without_payload_errors() {
+        let tmp =
+            std::env::temp_dir().join(format!("test_msi_empty_{}", Uuid::new_v4().hyphenated()));
+        let work_dir = tmp.join("work");
+        fs::create_dir_all(&work_dir).unwrap();
+
+        let metadata = Metadata {
+            name: "emptyapp".to_string(),
+            version: "1.0.0".to_string(),
+            maintainer: "Test".to_string(),
+            workdir: Some(work_dir.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let out_dir = tmp.join("out");
+        let err =
+            msi_package(&metadata, &out_dir).expect_err("an empty payload must not produce an MSI");
+        assert!(
+            err.to_string().contains("no Windows executable found"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(format!("{}.msi-dir", metadata.name));
+    }
+
+    #[test]
+    fn test_msi_preserves_subdirectories() {
+        let tmp =
+            std::env::temp_dir().join(format!("test_msi_subdirs_{}", Uuid::new_v4().hyphenated()));
+        let work_dir = tmp.join("work");
+        write_payload(&work_dir.join("bin"), "app.exe", &pe_payload());
+        write_payload(&work_dir.join("share"), "app.exe", &pe_payload());
+        write_payload(
+            &work_dir.join("share/doc"),
+            "readme.txt",
+            b"documentation content",
+        );
+
+        let metadata = Metadata {
+            name: "subdirapp".to_string(),
+            version: "1.0.0".to_string(),
+            maintainer: "Test".to_string(),
+            workdir: Some(work_dir.to_string_lossy().to_string()),
+            package_instructions: vec![
+                format!(
+                    "install -m755 \"local:{}\" to /bin/",
+                    work_dir.join("bin/app.exe").display()
+                ),
+                format!(
+                    "install -m644 \"local:{}\" to /share/",
+                    work_dir.join("share/app.exe").display()
+                ),
+                format!(
+                    "install -m644 \"local:{}\" to /share/doc/",
+                    work_dir.join("share/doc/readme.txt").display()
+                ),
+            ],
+            win_upgrade_code: "{11111111-2222-3333-4444-555555555555}".to_string(),
+            win_product_code: "{66666666-7777-8888-9999-AAAAAAAAAAAA}".to_string(),
+            win_manufacturer: "TestCorp".to_string(),
+            win_install_dir: "TestSubdirApp".to_string(),
+            ..Default::default()
+        };
+
+        let out_dir = tmp.join("out");
+        let msi_path = msi_package(&metadata, &out_dir)
+            .expect("msi_package should succeed with subdirectories");
+        assert!(msi_path.exists());
+
+        let pkg = msi::open(&msi_path).expect("open MSI");
+        assert!(pkg.has_table("Directory"));
+        assert!(pkg.has_table("Component"));
+        assert!(pkg.has_table("File"));
+
         let _ = fs::remove_dir_all(&tmp);
         let _ = fs::remove_dir_all(format!("{}.msi-dir", metadata.name));
     }

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct SnapApp<'a> {
     command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,6 +27,12 @@ struct SnapYaml<'a> {
     apps: BTreeMap<&'a str, SnapApp<'a>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SnapPart<'a> {
+    plugin: &'a str,
+    source: &'a str,
+}
+
 #[derive(Debug, Serialize)]
 struct SnapcraftYaml<'a> {
     name: &'a str,
@@ -36,6 +42,8 @@ struct SnapcraftYaml<'a> {
     grade: &'a str,
     confinement: &'a str,
     base: &'a str,
+    apps: BTreeMap<&'a str, SnapApp<'a>>,
+    parts: BTreeMap<&'a str, SnapPart<'a>>,
 }
 
 pub fn snap_package(
@@ -57,7 +65,10 @@ pub fn snap_package(
     let mut desktop_found = false;
     let mut icon_found = false;
 
-    if let Ok(entries) = walkdir::WalkDir::new(&base_dir).into_iter().collect::<Result<Vec<_>, _>>() {
+    if let Ok(entries) = walkdir::WalkDir::new(&base_dir)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+    {
         for entry in entries {
             let path = entry.path();
             if path.is_file()
@@ -65,11 +76,11 @@ pub fn snap_package(
             {
                 if ext == "desktop" && !desktop_found {
                     let target_desktop = gui_dir.join(format!("{}.desktop", metadata.name));
-                    let _ = fs::copy(path, target_desktop);
+                    fs::copy(path, target_desktop)?;
                     desktop_found = true;
                 } else if (ext == "png" || ext == "svg") && !icon_found {
                     let target_icon = gui_dir.join(format!("icon.{}", ext));
-                    let _ = fs::copy(path, target_icon);
+                    fs::copy(path, target_icon)?;
                     icon_found = true;
                 }
             }
@@ -95,7 +106,7 @@ pub fn snap_package(
                         rewritten.push('\n');
                     }
                 }
-                let _ = fs::write(&target_desktop, rewritten);
+                fs::write(&target_desktop, rewritten)?;
             }
         }
     }
@@ -147,7 +158,7 @@ pub fn snap_package(
         confinement: &metadata.snap_confinement,
         base: &metadata.snap_base,
         architectures: vec![architecture],
-        apps,
+        apps: apps.clone(),
     };
 
     let yaml_content = serde_yaml::to_string(&snap_meta)?;
@@ -155,6 +166,15 @@ pub fn snap_package(
 
     // Also generate a declarative snapcraft.yaml for developers using serde_yaml
     let snapcraft_yaml_path = meta_dir.join("snapcraft.yaml");
+    let mut parts = BTreeMap::new();
+    parts.insert(
+        metadata.name.as_str(),
+        SnapPart {
+            plugin: "dump",
+            source: ".",
+        },
+    );
+
     let snapcraft_meta = SnapcraftYaml {
         name: &metadata.name,
         version: &metadata.version,
@@ -163,10 +183,11 @@ pub fn snap_package(
         grade: &metadata.snap_grade,
         confinement: &metadata.snap_confinement,
         base: &metadata.snap_base,
+        apps,
+        parts,
     };
-    if let Ok(sc_yaml) = serde_yaml::to_string(&snapcraft_meta) {
-        let _ = fs::write(&snapcraft_yaml_path, sc_yaml);
-    }
+    let sc_yaml = serde_yaml::to_string(&snapcraft_meta)?;
+    fs::write(&snapcraft_yaml_path, sc_yaml)?;
 
     if !output_dir.exists() {
         fs::create_dir_all(output_dir)?;
@@ -191,4 +212,70 @@ pub fn snap_package(
     }
 
     Ok(snap_output_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_snapcraft_has_apps_and_parts() {
+        let tmp = std::env::temp_dir().join(format!(
+            "test_snapcraft_{}",
+            uuid::Uuid::new_v4().hyphenated()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let out_dir = tmp.join("out");
+        fs::create_dir_all(&out_dir).expect("create out dir");
+
+        let work_dir = tmp.join("work");
+        fs::create_dir_all(work_dir.join("usr/bin")).expect("create bin dir");
+        fs::write(work_dir.join("usr/bin/snaptest"), b"#!/bin/sh\necho snap").expect("write bin");
+
+        let metadata = Metadata {
+            name: "snaptest".to_string(),
+            version: "1.0.0".to_string(),
+            description: "A short snap test description".to_string(),
+            maintainer: "Maintainer <m@example.com>".to_string(),
+            workdir: Some(work_dir.to_string_lossy().to_string()),
+            package_instructions: vec![format!(
+                "install -m755 \"local:{}\" to /usr/bin/",
+                work_dir.join("usr/bin/snaptest").display()
+            )],
+            snap_grade: "stable".to_string(),
+            snap_confinement: "strict".to_string(),
+            snap_base: "core22".to_string(),
+            clean_workdir: false,
+            ..Default::default()
+        };
+
+        let snap_path = snap_package(&metadata, &out_dir).expect("snap_package");
+        assert!(snap_path.exists());
+
+        // Verify the staged snapcraft.yaml file
+        let snap_dir = PathBuf::from(format!("{}.snap-dir", metadata.name));
+        let snapcraft_path = snap_dir.join("meta/snapcraft.yaml");
+        assert!(snapcraft_path.exists(), "meta/snapcraft.yaml must exist");
+
+        let content = fs::read_to_string(&snapcraft_path).expect("read snapcraft.yaml");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&content).expect("parse snapcraft.yaml");
+
+        // Verify apps block
+        let apps = parsed.get("apps").expect("snapcraft.yaml must have apps");
+        let app = apps.get("snaptest").expect("must have app entry");
+        assert!(app.get("command").is_some());
+        assert!(app.get("plugs").is_some());
+
+        // Verify parts block
+        let parts = parsed.get("parts").expect("snapcraft.yaml must have parts");
+        let part = parts.get("snaptest").expect("must have part entry");
+        assert_eq!(part.get("plugin").and_then(|p| p.as_str()), Some("dump"));
+        assert_eq!(part.get("source").and_then(|s| s.as_str()), Some("."));
+
+        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(&snap_dir);
+    }
 }

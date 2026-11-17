@@ -63,7 +63,9 @@ pub fn freebsd_package(
                 files_manifest.insert(manifest_key, checksum);
 
                 // Check for desktop/icon integration
-                if target_tar_path.contains("share/applications") || target_tar_path.contains("share/icons") {
+                if target_tar_path.contains("share/applications")
+                    || target_tar_path.contains("share/icons")
+                {
                     has_desktop_or_icons = true;
                 }
 
@@ -71,7 +73,10 @@ pub fn freebsd_package(
                 #[cfg(unix)]
                 let mode = {
                     use std::os::unix::fs::PermissionsExt;
-                    entry.metadata().map(|m| m.permissions().mode()).unwrap_or(0o644)
+                    entry
+                        .metadata()
+                        .map(|m| m.permissions().mode())
+                        .unwrap_or(0o644)
                 };
                 #[cfg(not(unix))]
                 let mode = if target_tar_path.contains("bin/") {
@@ -123,7 +128,11 @@ pub fn freebsd_package(
     compact_header.set_mode(0o644);
     compact_header.set_mtime(0);
     compact_header.set_cksum();
-    tar.append_data(&mut compact_header, "+COMPACT_MANIFEST", compact_bytes.as_slice())?;
+    tar.append_data(
+        &mut compact_header,
+        "+COMPACT_MANIFEST",
+        compact_bytes.as_slice(),
+    )?;
 
     // Append +MANIFEST
     let manifest_bytes = full_manifest_json.into_bytes();
@@ -197,7 +206,8 @@ mod tests {
             ..Default::default()
         };
 
-        let pkg_path = freebsd_package(&metadata, &out_dir).expect("freebsd_package should succeed");
+        let pkg_path =
+            freebsd_package(&metadata, &out_dir).expect("freebsd_package should succeed");
         assert!(pkg_path.exists());
         assert!(pkg_path.to_string_lossy().ends_with("_amd64.pkg"));
 
@@ -213,13 +223,19 @@ mod tests {
 
         for entry in archive.entries().expect("entries") {
             let mut entry = entry.expect("valid entry");
-            let path = entry.path().expect("valid path").to_string_lossy().into_owned();
+            let path = entry
+                .path()
+                .expect("valid path")
+                .to_string_lossy()
+                .into_owned();
 
             if path == "+COMPACT_MANIFEST" {
                 found_compact = true;
             } else if path == "+MANIFEST" {
                 found_manifest = true;
-                entry.read_to_string(&mut manifest_content).expect("read manifest");
+                entry
+                    .read_to_string(&mut manifest_content)
+                    .expect("read manifest");
             } else if path == "+DESC" {
                 found_desc = true;
             }

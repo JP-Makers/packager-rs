@@ -10,7 +10,11 @@ pub const MAX_DOWNLOAD_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 pub async fn fetch_source(source: &str) -> Result<String, Box<dyn std::error::Error>> {
     if source.starts_with("http://") || source.starts_with("https://") {
         // Try to get filename from URL (stripping any query params and trailing slashes)
-        let clean_source = source.split('?').next().unwrap_or(source).trim_end_matches('/');
+        let clean_source = source
+            .split('?')
+            .next()
+            .unwrap_or(source)
+            .trim_end_matches('/');
         let raw_filename = clean_source
             .split('/')
             .next_back()
@@ -122,9 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_source_rejects_directory() {
-        let err = fetch_source("src")
-            .await
-            .expect_err("directory must error");
+        let err = fetch_source("src").await.expect_err("directory must error");
         assert!(err.to_string().contains("is a directory"));
     }
 }

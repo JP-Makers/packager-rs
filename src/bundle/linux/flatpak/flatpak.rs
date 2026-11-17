@@ -3,8 +3,8 @@ use super::architecture::FlatpakArchitecture;
 use crate::bundle::linux::archive;
 use crate::chmod::chmod_package_with_metadata;
 use crate::metadata::Metadata;
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,10 @@ pub fn flatpak_package(
     let arch = flatpak_arch.as_str();
 
     // Look for desktop and icon in files_dir and export them
-    if let Ok(entries) = walkdir::WalkDir::new(&files_dir).into_iter().collect::<Result<Vec<_>, _>>() {
+    if let Ok(entries) = walkdir::WalkDir::new(&files_dir)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+    {
         for entry in entries {
             let path = entry.path();
             if path.is_file()
@@ -42,10 +45,10 @@ pub fn flatpak_package(
             {
                 if ext == "desktop" {
                     let target_desktop = export_apps.join(format!("{}.desktop", app_id));
-                    let _ = fs::copy(path, target_desktop);
+                    fs::copy(path, target_desktop)?;
                 } else if ext == "svg" || ext == "png" {
                     let target_icon = export_icons.join(format!("{}.{}", app_id, ext));
-                    let _ = fs::copy(path, target_icon);
+                    fs::copy(path, target_icon)?;
                 }
             }
         }
@@ -71,6 +74,7 @@ pub fn flatpak_package(
     writeln!(meta_file, "[Context]")?;
     writeln!(meta_file, "shared=network;ipc;")?;
     writeln!(meta_file, "sockets=x11;wayland;fallback-x11;pulseaudio;")?;
+    writeln!(meta_file, "devices=all;")?;
     writeln!(meta_file, "filesystems=xdg-download;")?;
     drop(meta_file);
 
@@ -91,10 +95,10 @@ pub fn flatpak_package(
 
     // Copy manifests into output_dir
     let out_manifest_path = output_dir.join(format!("{}.json", app_id));
-    let _ = fs::copy(&manifest_file_path, &out_manifest_path);
+    fs::copy(&manifest_file_path, &out_manifest_path)?;
 
     let out_yaml_manifest_path = output_dir.join(format!("{}.yaml", app_id));
-    let _ = fs::copy(&manifest_yaml_path, &out_yaml_manifest_path);
+    fs::copy(&manifest_yaml_path, &out_yaml_manifest_path)?;
 
     // Generate .flatpakref file
     let ref_filename = format!("{}.flatpakref", app_id);
@@ -108,17 +112,18 @@ pub fn flatpak_package(
     writeln!(ref_file, "Description={}", metadata.description)?;
     drop(ref_file);
 
-    let flatpak_bundle_path = output_dir.join(format!("{}_{}_{}.flatpak", metadata.name, metadata.version, arch));
-    let flatpak_tar_gz_path = output_dir.join(format!("{}_{}_{}.flatpak.tar.gz", metadata.name, metadata.version, arch));
+    let flatpak_tar_gz_path = output_dir.join(format!(
+        "{}_{}_{}.flatpak.tar.gz",
+        metadata.name, metadata.version, arch
+    ));
 
-    let return_path = create_flatpak_bundle(&base_dir, &flatpak_bundle_path, &flatpak_tar_gz_path)?;
+    let return_path = create_flatpak_bundle(&base_dir, &flatpak_tar_gz_path)?;
 
     println!("Flatpak package created successfully!");
     println!("  JSON Manifest: {}", out_manifest_path.display());
     println!("  YAML Manifest: {}", out_yaml_manifest_path.display());
     println!("  Ref File     : {}", ref_path.display());
-    println!("  Package      : {}", return_path.display());
-    println!("  Archive      : {}", flatpak_tar_gz_path.display());
+    println!("  Archive      : {}", return_path.display());
 
     // Clean up temporary bundle directory only if clean_workdir is requested
     if metadata.clean_workdir {
@@ -130,10 +135,9 @@ pub fn flatpak_package(
 
 fn create_flatpak_bundle(
     base_dir: &Path,
-    flatpak_path: &Path,
     tar_gz_path: &Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let file = File::create(flatpak_path)?;
+    let file = File::create(tar_gz_path)?;
     let enc = GzEncoder::new(file, Compression::default());
     let mut tar = Builder::new(enc);
 
@@ -152,8 +156,64 @@ fn create_flatpak_bundle(
     let enc = tar.into_inner()?;
     enc.finish()?;
 
-    // Also produce .flatpak.tar.gz
-    let _ = fs::copy(flatpak_path, tar_gz_path);
+    Ok(tar_gz_path.to_path_buf())
+}
 
-    Ok(flatpak_path.to_path_buf())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_flatpak_extension_matches_format() {
+        let tmp = std::env::temp_dir().join(format!(
+            "test_flatpak_ext_{}",
+            uuid::Uuid::new_v4().hyphenated()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let out_dir = tmp.join("out");
+        fs::create_dir_all(&out_dir).expect("create out dir");
+
+        let work_dir = tmp.join("work");
+        fs::create_dir_all(work_dir.join("usr/bin")).expect("create bin dir");
+        fs::write(
+            work_dir.join("usr/bin/mytestapp"),
+            b"#!/bin/sh\necho flatpak",
+        )
+        .expect("write bin");
+
+        let metadata = Metadata {
+            name: "mytestapp".to_string(),
+            version: "1.0.0".to_string(),
+            description: "A short test application description".to_string(),
+            maintainer: "Maintainer <m@example.com>".to_string(),
+            workdir: Some(work_dir.to_string_lossy().to_string()),
+            package_instructions: vec![format!(
+                "install -m755 \"local:{}\" to /usr/bin/",
+                work_dir.join("usr/bin/mytestapp").display()
+            )],
+            ..Default::default()
+        };
+
+        let result_path = flatpak_package(&metadata, &out_dir).expect("package flatpak");
+        assert!(result_path.exists());
+        let result_str = result_path.to_string_lossy();
+        assert!(
+            result_str.ends_with(".flatpak.tar.gz"),
+            "expected result to end with .flatpak.tar.gz, got {}",
+            result_str
+        );
+
+        // Verify that NO fake .flatpak file (without .tar.gz) was generated
+        let fake_flatpak = out_dir.join(format!("{}_1.0.0_x86_64.flatpak", metadata.name));
+        assert!(
+            !fake_flatpak.exists(),
+            "fake .flatpak file should not exist, but found {}",
+            fake_flatpak.display()
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(format!("{}.flatpak-dir", metadata.name));
+    }
 }

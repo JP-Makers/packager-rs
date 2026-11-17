@@ -1,6 +1,8 @@
+#[cfg(target_os = "linux")]
 use crate::metadata::Metadata;
-use alpm_types::MetadataFileName;
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::io::Write;
 use std::path::Path;
 
@@ -19,12 +21,13 @@ pub fn get_installed_size(input_path: impl AsRef<Path>) -> u64 {
     total_size
 }
 
+#[cfg(target_os = "linux")]
 pub fn create_package_info(
     input_path: impl AsRef<Path>,
     metadata: &Metadata,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input_path = input_path.as_ref();
-    let mut file = File::create(input_path.join(MetadataFileName::PackageInfo.as_ref()))?;
+    let mut file = File::create(input_path.join(".PKGINFO"))?;
 
     let mut dynamic_fields = String::new();
     for conflict in &metadata.conflicts {

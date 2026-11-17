@@ -12,7 +12,10 @@ use pgp::packet::{
     Subpacket, SubpacketData, UserId,
 };
 use pgp::ser::Serialize;
-use pgp::types::{KeyDetails, KeyVersion, Password, PlainSecretParams, PublicParams, SecretParams, SignedUser, Timestamp};
+use pgp::types::{
+    KeyDetails, KeyVersion, Password, PlainSecretParams, PublicParams, SecretParams, SignedUser,
+    Timestamp,
+};
 use serde::{Deserialize, Serialize as SerdeSerialize};
 use sha1::Sha1;
 use sha2::Sha256;
@@ -57,9 +60,8 @@ pub fn generate_ed25519_keypair(
         pgp::crypto::ed25519::Mode::EdDSALegacy,
     )?;
     let public_params = PublicParams::EdDSALegacy((&secret).into());
-    let secret_params = PlainSecretParams::EdDSALegacy(
-        pgp::crypto::eddsa_legacy::SecretKey::Ed25519(secret),
-    );
+    let secret_params =
+        PlainSecretParams::EdDSALegacy(pgp::crypto::eddsa_legacy::SecretKey::Ed25519(secret));
 
     let now = Timestamp::now();
     let pub_key_inner = PubKeyInner::new(
@@ -79,29 +81,38 @@ pub fn generate_ed25519_keypair(
         PublicKeyAlgorithm::EdDSALegacy,
         HashAlgorithm::Sha512,
     );
-    sig_cfg.hashed_subpackets.push(
-        Subpacket::regular(SubpacketData::SignatureCreationTime(now))?,
-    );
+    sig_cfg
+        .hashed_subpackets
+        .push(Subpacket::regular(SubpacketData::SignatureCreationTime(
+            now,
+        ))?);
     let mut keyflags = KeyFlags::default();
     keyflags.set_sign(true);
     keyflags.set_certify(true);
-    sig_cfg.hashed_subpackets.push(
-        Subpacket::regular(SubpacketData::KeyFlags(keyflags))?,
-    );
-    sig_cfg.hashed_subpackets.push(
-        Subpacket::regular(SubpacketData::IssuerFingerprint(primary_pub.fingerprint()))?,
-    );
-    sig_cfg.unhashed_subpackets.push(
-        Subpacket::regular(SubpacketData::IssuerKeyId(primary_pub.legacy_key_id()))?,
-    );
+    sig_cfg
+        .hashed_subpackets
+        .push(Subpacket::regular(SubpacketData::KeyFlags(keyflags))?);
+    sig_cfg
+        .hashed_subpackets
+        .push(Subpacket::regular(SubpacketData::IssuerFingerprint(
+            primary_pub.fingerprint(),
+        ))?);
+    sig_cfg
+        .unhashed_subpackets
+        .push(Subpacket::regular(SubpacketData::IssuerKeyId(
+            primary_pub.legacy_key_id(),
+        ))?);
 
-    let cert_sig = sig_cfg.sign_certification(
-        &primary_sec,
-        &primary_pub,
-        &Password::empty(),
-        uid.tag(),
-        &uid,
-    )?;
+    let (passphrase, has_passphrase) = signing_passphrase_info();
+    if !has_passphrase {
+        eprintln!(
+            "WARNING: Generating unencrypted release signing key (PACKAGER_KEY_PASSPHRASE not set).\n\
+             Anyone with access to the key directory can sign releases."
+        );
+    }
+
+    let cert_sig =
+        sig_cfg.sign_certification(&primary_sec, &primary_pub, &passphrase, uid.tag(), &uid)?;
 
     let signed_user = SignedUser::new(uid, vec![cert_sig]);
     let details = SignedKeyDetails::new(vec![], vec![], vec![signed_user], vec![]);
@@ -145,6 +156,17 @@ pub fn default_key_dir_for(app_name: &str) -> PathBuf {
     }
 }
 
+/// Obtain passphrase from environment (`PACKAGER_KEY_PASSPHRASE` or `KEYGEN_PASSPHRASE`).
+fn signing_passphrase_info() -> (Password, bool) {
+    if let Ok(p) =
+        std::env::var("PACKAGER_KEY_PASSPHRASE").or_else(|_| std::env::var("KEYGEN_PASSPHRASE"))
+        && !p.is_empty()
+    {
+        return (Password::from(p), true);
+    }
+    (Password::empty(), false)
+}
+
 /// Write secret material with `0600`, creating the parent directory `0700`.
 fn secure_write_secret(path: &Path, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
@@ -184,7 +206,12 @@ fn load_secret_key(path: &Path) -> Result<Option<SignedSecretKey>, Box<dyn std::
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+            format!(
+                "failed to enforce 0600 permissions on secret key {}: {e}",
+                path.display()
+            )
+        })?;
     }
 
     let bytes = fs::read(path)?;
@@ -274,7 +301,10 @@ pub fn generate_or_load_key_in(
     let user_id = if !metadata.maintainer.is_empty() && !metadata.email.is_empty() {
         format!("{} <{}>", metadata.maintainer, metadata.email)
     } else if !metadata.name.is_empty() {
-        format!("{} Release Key <noreply@{}.org>", metadata.name, metadata.name)
+        format!(
+            "{} Release Key <noreply@{}.org>",
+            metadata.name, metadata.name
+        )
     } else {
         "Release Signing Key <release@example.org>".to_string()
     };
@@ -305,9 +335,11 @@ pub fn validate_ed25519_signature(
         }
         pgp::types::SignatureBytes::Mpis(mpis) => {
             if mpis.len() != 2 {
-                return Err(
-                    format!("Expected 2 MPIs for Ed25519 signature, found {}", mpis.len()).into(),
-                );
+                return Err(format!(
+                    "Expected 2 MPIs for Ed25519 signature, found {}",
+                    mpis.len()
+                )
+                .into());
             }
             let r_raw: &[u8] = mpis[0].as_ref();
             let s_raw: &[u8] = mpis[1].as_ref();
@@ -353,17 +385,31 @@ pub fn sign_bytes(
         secret_key.primary_key.algorithm(),
         HashAlgorithm::Sha512,
     );
-    config.hashed_subpackets.push(
-        Subpacket::regular(SubpacketData::SignatureCreationTime(Timestamp::now()))?
-    );
-    config.hashed_subpackets.push(
-        Subpacket::regular(SubpacketData::IssuerFingerprint(secret_key.primary_key.fingerprint()))?
-    );
-    config.unhashed_subpackets.push(
-        Subpacket::regular(SubpacketData::IssuerKeyId(secret_key.primary_key.legacy_key_id()))?
-    );
+    config
+        .hashed_subpackets
+        .push(Subpacket::regular(SubpacketData::SignatureCreationTime(
+            Timestamp::now(),
+        ))?);
+    config
+        .hashed_subpackets
+        .push(Subpacket::regular(SubpacketData::IssuerFingerprint(
+            secret_key.primary_key.fingerprint(),
+        ))?);
+    config
+        .unhashed_subpackets
+        .push(Subpacket::regular(SubpacketData::IssuerKeyId(
+            secret_key.primary_key.legacy_key_id(),
+        ))?);
 
-    let sig = config.sign(&secret_key.primary_key, &Password::empty(), cursor)?;
+    let (passphrase, has_passphrase) = signing_passphrase_info();
+    if !has_passphrase {
+        eprintln!(
+            "WARNING: Release signing key is unencrypted (PACKAGER_KEY_PASSPHRASE not set).\n\
+             Anyone with read access to the key file can sign releases."
+        );
+    }
+
+    let sig = config.sign(&secret_key.primary_key, &passphrase, cursor)?;
     // Validate Ed25519 cryptographic structure using ed25519 crate
     let _ed_sig = validate_ed25519_signature(&sig)?;
     let detached_sig = DetachedSignature::new(sig);
@@ -379,46 +425,13 @@ pub fn sign_bytes(
     Ok((armored_sig, binary_sig))
 }
 
-fn format_rfc2822_now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86400;
-    let rem_secs = secs % 86400;
-    let hours = rem_secs / 3600;
-    let mins = (rem_secs % 3600) / 60;
-    let s = rem_secs % 60;
-
-    let wdays = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    let wday = wdays[(days % 7) as usize];
-
-    let mut y = 1970i64;
-    let mut d = days as i64;
-    loop {
-        let leap = if (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) { 1 } else { 0 };
-        let days_in_year = 365 + leap;
-        if d >= days_in_year {
-            d -= days_in_year;
-            y += 1;
-        } else {
-            let mdays = [31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-            let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            let mut m = 0;
-            while m < 12 && d >= mdays[m] {
-                d -= mdays[m];
-                m += 1;
-            }
-            return format!("{}, {:02} {} {} {:02}:{:02}:{:02} +0000", wday, d + 1, months[m], y, hours, mins, s);
-        }
-    }
-}
-
 /// Generates a standard `zsync` delta control file for an AppImage bundle.
+/// Note: zsync control file generation is experimental.
 pub fn generate_zsync(
     appimage_path: &Path,
     zsync_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("Note: zsync control file generation is experimental.");
     let bytes = fs::read(appimage_path)?;
     let filename = appimage_path
         .file_name()
@@ -430,7 +443,7 @@ pub fn generate_zsync(
     sha1_hasher.update(&bytes);
     let sha1_hex = hex::encode(sha1_hasher.finalize());
 
-    let mtime_str = format_rfc2822_now();
+    let mtime_str = crate::repro::rfc2822(crate::repro::timestamp());
 
     let mut out = Vec::new();
     out.extend_from_slice(b"zsync: 0.6.2\n");
@@ -530,11 +543,19 @@ pub fn run_keygen_with_key_dir(
 
     // If package_paths is empty, scan output_dir for package files using a strict allowlist
     if target_packages.is_empty() && output_dir.exists() {
-        for entry in walkdir::WalkDir::new(output_dir).min_depth(1).max_depth(1).into_iter().flatten() {
+        for entry in walkdir::WalkDir::new(output_dir)
+            .min_depth(1)
+            .max_depth(1)
+            .into_iter()
+            .flatten()
+        {
             let p = entry.path().to_path_buf();
             if p.is_file() {
                 let name = p.file_name().unwrap_or_default().to_string_lossy();
-                if ALLOWED_PACKAGE_EXTENSIONS.iter().any(|ext| name.ends_with(ext)) {
+                if ALLOWED_PACKAGE_EXTENSIONS
+                    .iter()
+                    .any(|ext| name.ends_with(ext))
+                {
                     target_packages.push(p);
                 }
             }
@@ -553,7 +574,11 @@ pub fn run_keygen_with_key_dir(
             let (_, binary_sig) = sign_bytes(&secret_key, &pkg_bytes)?;
             let sig_path = pkg_path.with_file_name(format!("{}.sig", pkg_filename));
             fs::write(&sig_path, &binary_sig)?;
-            let sig_name = sig_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let sig_name = sig_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             files_for_checksums.push((sig_path.clone(), sig_name));
             all_generated_signatures.push(sig_path);
         } else if pkg_filename.ends_with(".oci-manifest.json") || pkg_filename.ends_with(".oci") {
@@ -566,7 +591,11 @@ pub fn run_keygen_with_key_dir(
             };
             let sig_path = pkg_path.with_file_name(sig_name);
             fs::write(&sig_path, &binary_sig)?;
-            let sig_name = sig_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let sig_name = sig_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             files_for_checksums.push((sig_path.clone(), sig_name));
             all_generated_signatures.push(sig_path);
         } else if pkg_filename.ends_with(".msi")
@@ -580,7 +609,11 @@ pub fn run_keygen_with_key_dir(
             let (armored_sig, _) = sign_bytes(&secret_key, &pkg_bytes)?;
             let asc_path = pkg_path.with_file_name(format!("{}.asc", pkg_filename));
             fs::write(&asc_path, &armored_sig)?;
-            let asc_name = asc_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let asc_name = asc_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             files_for_checksums.push((asc_path.clone(), asc_name));
             all_generated_signatures.push(asc_path);
         }
@@ -589,7 +622,11 @@ pub fn run_keygen_with_key_dir(
         if pkg_filename.ends_with(".AppImage") {
             let zsync_path = pkg_path.with_file_name(format!("{}.zsync", pkg_filename));
             if generate_zsync(pkg_path, &zsync_path).is_ok() {
-                let zsync_name = zsync_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let zsync_name = zsync_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 files_for_checksums.push((zsync_path.clone(), zsync_name));
                 all_generated_signatures.push(zsync_path.clone());
 
@@ -597,7 +634,11 @@ pub fn run_keygen_with_key_dir(
                 let (zsync_armored, _) = sign_bytes(&secret_key, &zsync_bytes)?;
                 let zsync_asc_path = pkg_path.with_file_name(format!("{}.zsync.asc", pkg_filename));
                 fs::write(&zsync_asc_path, &zsync_armored)?;
-                let zsync_asc_name = zsync_asc_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let zsync_asc_name = zsync_asc_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 files_for_checksums.push((zsync_asc_path.clone(), zsync_asc_name));
                 all_generated_signatures.push(zsync_asc_path);
             }
@@ -742,15 +783,15 @@ mod tests {
         let (armored, binary) = sign_bytes(&secret_key, data).unwrap();
 
         // 1. Validate armored signature parsing with ed25519 crate
-        let ed_sig =
-            parse_ed25519_armored_signature(&armored).expect("must parse ed25519 armored signature");
+        let ed_sig = parse_ed25519_armored_signature(&armored)
+            .expect("must parse ed25519 armored signature");
         assert_eq!(ed_sig.to_bytes().len(), 64);
         assert_eq!(ed_sig.r_bytes().len(), 32);
         assert_eq!(ed_sig.s_bytes().len(), 32);
 
         // 2. Validate binary signature parsing with ed25519 crate
-        let detached_bin =
-            DetachedSignature::from_bytes(Cursor::new(&binary)).expect("must parse detached binary");
+        let detached_bin = DetachedSignature::from_bytes(Cursor::new(&binary))
+            .expect("must parse detached binary");
         let ed_sig_bin = validate_ed25519_signature(&detached_bin.signature)
             .expect("must validate binary ed25519 signature");
         assert_eq!(ed_sig_bin.to_bytes(), ed_sig.to_bytes());
@@ -804,8 +845,14 @@ mod tests {
 
         // Same identity, now stored securely outside the output directory.
         assert_eq!(
-            loaded.to_public_key().to_armored_string(ArmorOptions::default()).unwrap(),
-            secret.to_public_key().to_armored_string(ArmorOptions::default()).unwrap()
+            loaded
+                .to_public_key()
+                .to_armored_string(ArmorOptions::default())
+                .unwrap(),
+            secret
+                .to_public_key()
+                .to_armored_string(ArmorOptions::default())
+                .unwrap()
         );
         assert!(key_dir.join(SECRET_KEY_FILE).is_file());
 
@@ -830,7 +877,8 @@ mod tests {
 
     #[test]
     fn test_run_keygen_ignores_unallowed_extensions_in_output_dir() {
-        let tmp = std::env::temp_dir().join(format!("test_keygen_allowlist_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("test_keygen_allowlist_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         let out_dir = tmp.join("dist");
         let key_dir = tmp.join("keys");
@@ -850,9 +898,18 @@ mod tests {
 
         let sums = fs::read_to_string(&results.sha256sums).unwrap();
         assert!(sums.contains("app_1.0_amd64.deb"));
-        assert!(!sums.contains("id_rsa"), "secret files must not be swept into SHA256SUMS.txt");
-        assert!(!sums.contains("build.log"), "logs must not be swept into SHA256SUMS.txt");
-        assert!(!sums.contains("temp.tmp"), "temp files must not be swept into SHA256SUMS.txt");
+        assert!(
+            !sums.contains("id_rsa"),
+            "secret files must not be swept into SHA256SUMS.txt"
+        );
+        assert!(
+            !sums.contains("build.log"),
+            "logs must not be swept into SHA256SUMS.txt"
+        );
+        assert!(
+            !sums.contains("temp.tmp"),
+            "temp files must not be swept into SHA256SUMS.txt"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -870,5 +927,34 @@ mod tests {
 
         let generic = default_key_dir();
         assert!(generic.ends_with(Path::new("packager/keys")));
+    }
+
+    #[test]
+    fn test_zsync_generation() {
+        let tmp =
+            std::env::temp_dir().join(format!("test_zsync_{}", uuid::Uuid::new_v4().hyphenated()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let appimage_path = tmp.join("testapp.AppImage");
+        let payload = vec![0x42u8; 10000];
+        fs::write(&appimage_path, &payload).expect("write appimage");
+
+        let zsync_path = tmp.join("testapp.AppImage.zsync");
+        generate_zsync(&appimage_path, &zsync_path).expect("generate zsync");
+        assert!(zsync_path.exists());
+
+        let zsync_bytes = fs::read(&zsync_path).expect("read zsync");
+        let header_str = String::from_utf8_lossy(&zsync_bytes);
+
+        assert!(header_str.starts_with("zsync: 0.6.2\n"));
+        assert!(header_str.contains("Filename: testapp.AppImage\n"));
+        assert!(header_str.contains("Blocksize: 4096\n"));
+        assert!(header_str.contains("Length: 10000\n"));
+        assert!(header_str.contains("Hash-Lengths: 2,2,5\n"));
+        assert!(header_str.contains("URL: testapp.AppImage\n"));
+        assert!(header_str.contains("SHA-1: "));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

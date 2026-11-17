@@ -1,3 +1,3 @@
 pub mod freebsd;
 
-pub use freebsd::{freebsd_package, freebsd_package as build_freebsd, FreeBSDDep, FreeBSDManifest};
+pub use freebsd::{FreeBSDDep, FreeBSDManifest, freebsd_package};

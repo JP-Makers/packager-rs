@@ -1,5 +1,6 @@
 use super::metadata::{self, Metadata};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -47,10 +48,7 @@ fn tokenize_line(line: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> 
 
 /// Resolve an install destination against the package root, rejecting anything
 /// that could escape it. This is the last line of defence before `fs::copy`.
-fn safe_destination(
-    base_dir: &Path,
-    dest: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn safe_destination(base_dir: &Path, dest: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if dest.contains('\0') {
         return Err(format!("destination contains a NUL byte: {dest:?}").into());
     }
@@ -59,7 +57,9 @@ fn safe_destination(
         return Err(format!("absolute destination not allowed: {dest:?}").into());
     }
 
-    let relative = dest.trim_start_matches('/');
+    // Normalize Windows backslashes so cross-compiling on Unix parses components correctly
+    let normalized = dest.replace('\\', "/");
+    let relative = normalized.trim_start_matches('/');
     let mut depth: i32 = 0;
 
     for component in Path::new(relative).components() {
@@ -88,12 +88,17 @@ pub fn chmod_package_with_metadata(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Preparing package layout: {}", metadata.name);
 
-    if base_dir == Path::new(".") || base_dir == Path::new("..") || base_dir.as_os_str().is_empty() {
+    if base_dir == Path::new(".") || base_dir == Path::new("..") || base_dir.as_os_str().is_empty()
+    {
         return Err("staging directory cannot be current or parent directory".into());
     }
 
     if base_dir.is_symlink() {
-        return Err(format!("refusing to remove symlinked staging directory: {:?}", base_dir).into());
+        return Err(format!(
+            "refusing to remove symlinked staging directory: {:?}",
+            base_dir
+        )
+        .into());
     }
 
     if base_dir.exists() {
@@ -102,7 +107,9 @@ pub fn chmod_package_with_metadata(
         if canon_base == canon_cwd {
             return Err("refusing to delete current working directory as staging dir".into());
         }
-        let temp_dir = std::env::temp_dir().canonicalize().unwrap_or_else(|_| std::env::temp_dir());
+        let temp_dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir());
         if !canon_base.starts_with(&canon_cwd) && !canon_base.starts_with(&temp_dir) {
             return Err(format!(
                 "staging directory must be inside working directory or temp directory: {:?}",
@@ -172,11 +179,12 @@ fn process_install_line(
     current_idx += 1;
 
     // Check if source specifies "local:" prefix or is a direct local asset path
-    let (source_file_name, is_explicit_local) = if let Some(local_path) = raw_source.strip_prefix("local:") {
-        (local_path.to_string(), true)
-    } else {
-        (raw_source.to_string(), false)
-    };
+    let (source_file_name, is_explicit_local) =
+        if let Some(local_path) = raw_source.strip_prefix("local:") {
+            (local_path.to_string(), true)
+        } else {
+            (raw_source.to_string(), false)
+        };
 
     // Only an explicit `local:` source may point outside the work directory.
     // Without the prefix this would be an accidental (or malicious) read of
@@ -261,10 +269,12 @@ fn process_install_line(
     let mut full_dest = safe_destination(base_dir, &dest_path_str)?;
 
     // If destination is a directory (explicit trailing slash or root), append filename
-    let is_dir_target = dest_path_str.ends_with('/') || dest_path_str == "/" || full_dest.is_dir();
-    if is_dir_target
-        && let Some(file_name) = Path::new(&source_file_name).file_name()
-    {
+    let is_dir_target = dest_path_str.ends_with('/')
+        || dest_path_str.ends_with('\\')
+        || dest_path_str == "/"
+        || dest_path_str == "\\"
+        || full_dest.is_dir();
+    if is_dir_target && let Some(file_name) = Path::new(&source_file_name).file_name() {
         // `file_name()` yields a single component, so this cannot escape.
         full_dest = full_dest.join(file_name);
     }
@@ -294,9 +304,16 @@ fn process_install_line(
     }
 
     // Set permissions
-    let mut perms = fs::metadata(&full_dest)?.permissions();
-    perms.set_mode(mode);
-    fs::set_permissions(&full_dest, perms)?;
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&full_dest)?.permissions();
+        perms.set_mode(mode);
+        fs::set_permissions(&full_dest, perms)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+    }
 
     Ok(())
 }
@@ -335,7 +352,13 @@ mod tests {
         let tokens = tokenize_line(line).expect("tokenize");
         assert_eq!(
             tokens,
-            vec!["install", "-m644", "local:./metadata", "to", "/usr/share/doc/twincan/"]
+            vec![
+                "install",
+                "-m644",
+                "local:./metadata",
+                "to",
+                "/usr/share/doc/twincan/"
+            ]
         );
     }
 
@@ -349,8 +372,8 @@ mod tests {
     #[test]
     fn test_safe_destination_rejects_parent_traversal() {
         let base = Path::new("pkg");
-        let err = safe_destination(base, "/../../escaped.txt")
-            .expect_err("traversal must be rejected");
+        let err =
+            safe_destination(base, "/../../escaped.txt").expect_err("traversal must be rejected");
         assert!(err.to_string().contains("escapes package root"));
     }
 
@@ -369,11 +392,18 @@ mod tests {
     }
 
     #[test]
+    fn test_safe_destination_accepts_windows_leading_backslash() {
+        let base = Path::new("pkg");
+        let got = safe_destination(base, r"\Program Files\TwinCAN\")
+            .expect("windows backslash path is fine");
+        assert_eq!(got, base.join("Program Files").join("TwinCAN"));
+    }
+
+    #[test]
     fn test_windows_path_with_space_is_one_component() {
-        let tokens = tokenize_line(
-            r#"install -m755 "TwinCAN/TwinCAN" to "/Program Files/TwinCAN/""#,
-        )
-        .expect("tokenize");
+        let tokens =
+            tokenize_line(r#"install -m755 "TwinCAN/TwinCAN" to "/Program Files/TwinCAN/""#)
+                .expect("tokenize");
         assert_eq!(tokens[4], "/Program Files/TwinCAN/");
     }
 
@@ -427,7 +457,10 @@ mod tests {
         fs::write(dir.join("TwinCAN"), b"bin").unwrap();
 
         let err = process_install_line(
-            &format!("install -m755 \"local:{}\" to /Program Files/TwinCAN/", dir.join("TwinCAN").display()),
+            &format!(
+                "install -m755 \"local:{}\" to /Program Files/TwinCAN/",
+                dir.join("TwinCAN").display()
+            ),
             &base,
             "work",
             false,
@@ -457,6 +490,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_install_rejects_symlink_source() {
         let dir = tmpdir("symlink");
         let work = dir.join("work");
@@ -479,6 +513,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_install_rejects_canonical_escape() {
         let dir = tmpdir("escape");
         let work = dir.join("work");
@@ -515,6 +550,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_chmod_package_refuses_symlinked_base_dir() {
         let dir = tmpdir("sym_base");
         let target = dir.join("target");
@@ -528,7 +564,10 @@ mod tests {
         };
         let err = chmod_package_with_metadata(&metadata, &sym, false)
             .expect_err("refuse symlinked base dir");
-        assert!(err.to_string().contains("refusing to remove symlinked staging directory"));
+        assert!(
+            err.to_string()
+                .contains("refusing to remove symlinked staging directory")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

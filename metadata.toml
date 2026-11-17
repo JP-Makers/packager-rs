@@ -154,11 +154,8 @@ win_product_code = ""
 win_desktop_shortcut = true
 win_program_menu_shortcut = true
 
-# Optional Windows installer icon (.ico) and NSIS 24-bit bitmaps (.bmp).
-# If empty, default built-in artwork or payload icons are automatically located.
+# Optional Windows installer icon (.ico). If empty, auto-detected from payload.
 win_icon = ""
-win_header = ""
-win_wizard = ""
 
 # -----------------------------------------------------------------------------
 # FreeBSD
@@ -204,6 +201,9 @@ package = [
 [build.mac]
 # A DMG holds one architecture; a universal bundle requires a universal binary.
 arch = ["x86_64"]
+# Disabled until a real Darwin archive and checksum are supplied. With the
+# Linux payload the builder now refuses to produce a DMG (Mach-O check).
+enabled = false
 # Example: Darwin archive override:
 #   sources    = ["https://github.com/JP-Makers/twincan/releases/download/v1.0.0/TwinCAN-macos-x86_64.tar.gz"]
 #   sha256sums = ["<sha256>"]
@@ -219,6 +219,9 @@ package = [
 #   sources    = ["https://github.com/JP-Makers/twincan/releases/download/v1.0.0/TwinCAN-windows-x64.zip"]
 #   sha256sums = ["<sha256>"]
 arch = ["x64"]
+# Disabled until a real Windows archive and checksum are supplied. The builder
+# now refuses to produce an MSI from a non-PE payload.
+enabled = false
 package = [
     "install -m755 \"TwinCAN/TwinCAN\" to \"/Program Files/TwinCAN/\"",
     "install -m644 \"TwinCAN/LICENSE\" to \"/Program Files/TwinCAN/\"",

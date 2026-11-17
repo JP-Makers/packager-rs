@@ -1,23 +1,23 @@
 use crate::metadata::Metadata;
+#[cfg(target_os = "linux")]
 use alpm_buildinfo::BuildInfoV2;
-use alpm_types::{BuildDate, FromOffsetDateTime, MetadataFileName};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::str::FromStr;
-use time::OffsetDateTime;
 
 pub fn get_build_date() -> u64 {
-    let now = OffsetDateTime::now_utc();
-    BuildDate::from_offset_datetime(now) as u64
+    crate::repro::timestamp()
 }
 
+#[cfg(target_os = "linux")]
 pub fn create_build_info(
     input_path: impl AsRef<Path>,
     metadata: &Metadata,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input_path = input_path.as_ref();
-    let buildinfo_path = input_path.join(MetadataFileName::BuildInfo.as_ref());
+    let buildinfo_path = input_path.join(".BUILDINFO");
     let mut file = File::create(&buildinfo_path)?;
 
     let mut buildenv_str = String::new();
@@ -44,7 +44,7 @@ buildtoolver = 1:1.2.1-1-any
         metadata.version,
         metadata.release,
         metadata.arch.first().unwrap_or(&"any".to_string()),
-        metadata.pkgbuild_sha256sum,
+        metadata.metadata_sha256sum,
         metadata.maintainer,
         metadata.email,
         get_build_date(),

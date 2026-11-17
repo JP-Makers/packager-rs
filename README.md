@@ -1,8 +1,12 @@
 # packager-rs (package-builder)
 
+**Application:** `package-builder` — the command-line binary.
+**Library:** `packager-rs` — the Rust crate (`packager_rs`).
+**License:** MIT. Both the application and the library are open source: you may use, modify, and redistribute them under the terms of the [MIT License](LICENSE).
+
 [![Rust Version](https://img.shields.io/badge/rust-1.85%2B%20%282024%20edition%29-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-83%20passed%20%7C%200%20failed-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-96%20passed%20%7C%200%20failed-brightgreen.svg)](#development)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20FreeBSD-blueviolet.svg)](#supported-formats)
 [![Security](https://img.shields.io/badge/security-Ed25519%20Signed%20%7C%20Sandbox--Fenced-success.svg)](#security--integrity)
 
@@ -21,9 +25,9 @@ A fast, pure-Rust multi-format packaging engine and library. Package CLI utiliti
 | **FreeBSD Package** | `.pkg` | FreeBSD | **Production** | Pure Rust (Zstandard tar archive + UCL/JSON `+MANIFEST`) |
 | **Cryptographic Signer**| `.asc` / `.sig` | All | **Production** | Pure Rust Ed25519 OpenPGP, `zsync` deltas, and `SHA256SUMS.txt` |
 | **Canonical Snap** | `.snap` | Linux | **Sideload / Store** | Pure Rust (SquashFS + `meta/snap.yaml` with hardware plugs) |
-| **OCI Container** | `.json` / tarballs | Universal | **Spec v1** | Pure Rust container manifest, config blob, and rootfs layers |
-| **Flatpak** | `.flatpak` / `.json` | Linux | **Manifest** | Valid manifest for `flatpak-builder` and Flathub + staging tar |
-| **Windows Installer** | `.msi` / `.exe` | Windows | **Experimental** | Pure Rust CFB/CAB database (MSI) & standalone PE NSIS stub |
+| **OCI Container** | Directory layout / blobs | Universal | **Image Layout v1** | Pure Rust OCI image layout (`oci-layout`, `index.json`, `blobs/sha256/*`) |
+| **Flatpak** | `.flatpak.tar.gz` / `.json` | Linux | **Manifest & Archive** | Valid manifest for `flatpak-builder` / Flathub and `.flatpak.tar.gz` payload |
+| **Windows Installer** | `.msi` | Windows | **Experimental** | Pure Rust CFB/CAB database (MSI) |
 | **macOS Disk Image** | `.dmg` | macOS | **Experimental** | Pure Rust UDIF container (Gatekeeper requires macOS `codesign`) |
 
 ---
@@ -50,10 +54,10 @@ package-builder
 # 2. Build only specific formats
 package-builder --deb --appimage --rpm
 
-# 3. Build cross-platform packages (Windows MSI/NSIS, macOS DMG, FreeBSD PKG)
-package-builder --msi --nsis --dmg --freebsd -o dist/
+# 3. Build cross-platform packages (Windows MSI, macOS DMG, FreeBSD PKG)
+package-builder --msi --dmg --freebsd -o dist/
 
-# 4. Verify manifest syntax and test source checksums without building
+# 4. Verify manifest syntax and local sources without mutating work tree
 package-builder --check
 
 # 5. Build packages and sign releases with Ed25519 OpenPGP keys + SHA256SUMS.txt
@@ -77,12 +81,11 @@ package-builder --all --clean
 | `-f, --flatpak` | Build Flatpak package and manifest |
 | `-g, --dmg` | Build Apple Disk Image (`.dmg`) for macOS |
 | `-w, --msi` | Build Windows Installer (`.msi`) |
-| `-n, --nsis` | Build Windows NSIS installer (`.exe`) |
 | `-b, --freebsd` | Build FreeBSD package (`.pkg`) |
 | `--oci` | Build OCI container image manifest and layers |
 | `-k, --keygen` | Generate Ed25519 release keys, detached signatures, and `SHA256SUMS.txt` |
 | `--all` | Build all formats (default when no format flag is specified) |
-| `-c, --check` | Validate manifest syntax and fetch/verify sources without packaging |
+| `-c, --check` | Validate manifest syntax and verify local sources without mutating work tree |
 | `--clean` | Remove extracted sources after build completion |
 | `--export-home` | Move completed packages to `~/package-builder` |
 
@@ -90,18 +93,18 @@ package-builder --all --clean
 
 ## Rust Library API
 
-Add `package-builder` to your `Cargo.toml`:
+The library is published as **`packager-rs`** and imported as **`packager_rs`**. Add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-package-builder = { git = "https://github.com/JP-Makers/packager-rs.git" }
+packager-rs = { git = "https://github.com/JP-Makers/packager-rs.git" }
 tokio = { version = "1.54.1", features = ["full"] }
 ```
 
 ### Programmatic Build Example
 
 ```rust
-use package_builder::PackageBuilder;
+use packager_rs::PackageBuilder;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -192,6 +195,14 @@ install -m<mode> "[local:]<source_file>" to "<destination_path>"
 - **Filesystem Traversal Defense**: Package destinations reject path traversal (`..`), Windows drive prefixes (`C:`), and UNC shares. Cleanups strictly refuse paths outside the current working directory.
 - **Symlink Exfiltration Prevention**: Inspects files using `fs::symlink_metadata` to block exfiltration of host secrets.
 - **Network Boundaries**: 15s connection timeouts, 300s transfer limits, and 4 GiB maximum download limits to prevent DoS.
+
+---
+
+## Known Limitations
+
+- **Cross-Platform Payload Gating**: Mac (`.dmg`) and Windows (`.msi`) builders require real native binaries (Mach-O and PE executables respectively). Packaging a Linux ELF binary as a DMG or MSI is strictly rejected. `[build.mac]` and `[build.windows]` are disabled by default in `metadata.toml` until dedicated platform sources and checksums are supplied.
+- **Code Signing**: Windows Authenticode and macOS Developer ID / Notarization are not embedded in pure Rust; release artifacts for macOS and Windows are cataloged in `SHA256SUMS.txt` and signed via Ed25519 OpenPGP signatures. Native signing requires platform-specific host tools (`codesign`, `signtool`).
+- **Signing Key Protection**: Unencrypted secret keys in default directories emit a security warning. Set `PACKAGER_KEY_PASSPHRASE` (or `KEYGEN_PASSPHRASE`) in your environment to protect signing keys with passphrase-derived encryption.
 
 ---
 

@@ -1,7 +1,7 @@
+use super::build_system::FlatpakBuildSystem;
 use super::format::FlatpakManifestFormat;
 use super::module::FlatpakModule;
 use super::source::FlatpakSource;
-use super::build_system::FlatpakBuildSystem;
 use crate::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -69,12 +69,18 @@ impl FlatpakApplication {
                             .unwrap_or("");
                         app_dest.push_str(filename);
                     }
-                    build_cmds.push(format!("install -D -m{} \"{}\" \"{}\"", mode, clean_src, app_dest));
+                    build_cmds.push(format!(
+                        "install -D -m{} \"{}\" \"{}\"",
+                        mode, clean_src, app_dest
+                    ));
                 }
             }
         }
         if build_cmds.is_empty() {
-            build_cmds.push(format!("install -D -m755 {} /app/bin/{}", exec_command, exec_command));
+            build_cmds.push(format!(
+                "install -D -m755 {} /app/bin/{}",
+                exec_command, exec_command
+            ));
         }
 
         let source_url = metadata.sources.first().cloned().unwrap_or_default();
@@ -99,6 +105,7 @@ impl FlatpakApplication {
                 "--socket=fallback-x11".to_string(),
                 "--share=network".to_string(),
                 "--socket=pulseaudio".to_string(),
+                "--device=all".to_string(),
             ],
             modules: vec![module],
         }
@@ -115,7 +122,10 @@ impl FlatpakApplication {
     }
 
     /// Dump to string according to `FlatpakManifestFormat`.
-    pub fn dump(&self, format: FlatpakManifestFormat) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn dump(
+        &self,
+        format: FlatpakManifestFormat,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         format.dump(self)
     }
 
@@ -147,7 +157,10 @@ mod tests {
                 name: "testapp".to_string(),
                 buildsystem: FlatpakBuildSystem::Simple,
                 build_commands: vec!["install -D -m755 testapp /app/bin/testapp".to_string()],
-                sources: vec![FlatpakSource::new_archive("https://example.com/test.tar.gz", "123456")],
+                sources: vec![FlatpakSource::new_archive(
+                    "https://example.com/test.tar.gz",
+                    "123456",
+                )],
                 ..Default::default()
             }],
         };
@@ -155,16 +168,18 @@ mod tests {
         // Test JSON roundtrip
         let json_str = app.to_json().expect("serialize to JSON");
         assert!(json_str.contains("\"app-id\": \"org.example.TestApp\""));
-        let parsed_json: FlatpakApplication =
-            FlatpakManifestFormat::JSON.parse(&json_str).expect("parse JSON");
+        let parsed_json: FlatpakApplication = FlatpakManifestFormat::JSON
+            .parse(&json_str)
+            .expect("parse JSON");
         assert_eq!(parsed_json.app_id, app.app_id);
         assert_eq!(parsed_json.modules.len(), 1);
 
         // Test YAML roundtrip
         let yaml_str = app.to_yaml().expect("serialize to YAML");
         assert!(yaml_str.contains("app-id: org.example.TestApp"));
-        let parsed_yaml: FlatpakApplication =
-            FlatpakManifestFormat::YAML.parse(&yaml_str).expect("parse YAML");
+        let parsed_yaml: FlatpakApplication = FlatpakManifestFormat::YAML
+            .parse(&yaml_str)
+            .expect("parse YAML");
         assert_eq!(parsed_yaml.app_id, app.app_id);
         assert_eq!(parsed_yaml.modules[0].name, "testapp");
     }

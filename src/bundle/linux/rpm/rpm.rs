@@ -1,5 +1,5 @@
 use crate::chmod::chmod_package_with_metadata;
-use crate::metadata::{self, Metadata};
+use crate::metadata::Metadata;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
@@ -101,11 +101,4 @@ if which gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -q -t
     }
 
     Ok(rpm_file_path)
-}
-
-pub fn rpm_build() -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = metadata::extract_metadata("metadata.toml")?;
-    let output_dir = std::env::current_dir()?.join("output");
-    rpm_package(&metadata, &output_dir)?;
-    Ok(())
 }

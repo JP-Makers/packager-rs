@@ -31,17 +31,16 @@ pub fn normalize_mode(mode: u32) -> u32 {
 }
 
 /// Numeric permission bits of a host file, or `0644` if they cannot be read.
-pub fn file_mode(path: &Path) -> u32 {
+pub fn file_mode(_path: &Path) -> u32 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path)
+        fs::metadata(_path)
             .map(|m| m.permissions().mode() & 0o7777)
             .unwrap_or(0o644)
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
         0o644
     }
 }
@@ -77,12 +76,7 @@ pub fn dir_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}/", path.display()))
 }
 
-fn root_header(
-    entry_type: EntryType,
-    size: u64,
-    mode: u32,
-    mtime: u64,
-) -> io::Result<Header> {
+fn root_header(entry_type: EntryType, size: u64, mode: u32, mtime: u64) -> io::Result<Header> {
     let mut header = Header::new_gnu();
     header.set_entry_type(entry_type);
     header.set_size(size);
@@ -166,6 +160,39 @@ mod tests {
 
         assert_eq!(entries[1].header().mode().unwrap(), 0o755);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_two_builds_are_reproducible() {
+        // Test that setting SOURCE_DATE_EPOCH guarantees byte-identical archives.
+        unsafe {
+            std::env::set_var("SOURCE_DATE_EPOCH", "1700000000");
+        }
+        let dir = std::env::temp_dir().join(format!("twincan-repro-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let payload = dir.join("payload");
+        fs::write(&payload, b"reproducible payload content").unwrap();
+
+        let mut buf1 = Vec::new();
+        {
+            let mut builder = Builder::new(&mut buf1);
+            append_dir(&mut builder, &dir, Path::new("usr/bin")).unwrap();
+            append_file(&mut builder, &payload, Path::new("usr/bin/payload"), 0o755).unwrap();
+            builder.finish().unwrap();
+        }
+
+        let mut buf2 = Vec::new();
+        {
+            let mut builder = Builder::new(&mut buf2);
+            append_dir(&mut builder, &dir, Path::new("usr/bin")).unwrap();
+            append_file(&mut builder, &payload, Path::new("usr/bin/payload"), 0o755).unwrap();
+            builder.finish().unwrap();
+        }
+
+        assert_eq!(buf1, buf2);
         let _ = fs::remove_dir_all(&dir);
     }
 }

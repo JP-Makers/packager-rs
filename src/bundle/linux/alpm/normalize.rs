@@ -11,7 +11,7 @@
 //! `.MTREE` ownership records are updated to match. File contents — and
 //! therefore every `sha256digest` in `.MTREE` — are left untouched.
 
-use crate::bundle::linux::archive::{self, normalize_mode, ROOT_GID, ROOT_UID};
+use crate::bundle::linux::archive::{self, ROOT_GID, ROOT_UID, normalize_mode};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -111,9 +111,7 @@ enum MtreeEncoding {
     Plain,
 }
 
-fn decode_mtree(
-    raw: &[u8],
-) -> Result<(Vec<u8>, MtreeEncoding), Box<dyn std::error::Error>> {
+fn decode_mtree(raw: &[u8]) -> Result<(Vec<u8>, MtreeEncoding), Box<dyn std::error::Error>> {
     // zstd frame magic.
     if raw.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         return Ok((zstd::stream::decode_all(raw)?, MtreeEncoding::Zstd));
@@ -128,10 +126,10 @@ fn decode_mtree(
         return Ok((raw.to_vec(), MtreeEncoding::Plain));
     }
 
-    Err(format!(
-        "{MTREE} is neither zstd, gzip nor plain mtree text; cannot normalise ownership"
+    Err(
+        format!("{MTREE} is neither zstd, gzip nor plain mtree text; cannot normalise ownership")
+            .into(),
     )
-    .into())
 }
 
 fn encode_mtree(plain: &[u8], encoding: MtreeEncoding) -> Vec<u8> {
@@ -252,7 +250,10 @@ mod tests {
             .map(|(_, _)| read_mtree(&pkg))
             .expect("package must still contain .MTREE");
 
-        assert!(mtree.contains("/set type=file uid=0 gid=0 mode=644"), "{mtree}");
+        assert!(
+            mtree.contains("/set type=file uid=0 gid=0 mode=644"),
+            "{mtree}"
+        );
         assert!(mtree.contains("/set mode=755"), "{mtree}");
         assert!(!mtree.contains("1000"), "{mtree}");
         assert!(!mtree.contains("mode=664"), "{mtree}");
@@ -297,7 +298,13 @@ mod tests {
 
         let compressed = zstd::stream::encode_all(&mtree[..], ZSTD_LEVEL).unwrap();
         push_entry(&mut builder, EntryType::Regular, MTREE, 0o664, &compressed);
-        push_entry(&mut builder, EntryType::Regular, ".PKGINFO", 0o664, b"pkgname=test\n");
+        push_entry(
+            &mut builder,
+            EntryType::Regular,
+            ".PKGINFO",
+            0o664,
+            b"pkgname=test\n",
+        );
         push_entry(&mut builder, EntryType::Directory, "usr", 0o775, b"");
         push_entry(&mut builder, EntryType::Directory, "usr/bin", 0o775, b"");
         push_entry(

@@ -1,8 +1,7 @@
 use super::metadata::Metadata;
-use blake2::{Blake2b512, Digest};
 use md5::Md5;
 use sha1::Sha1;
-use sha2::{Sha224, Sha256, Sha384, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use std::fs::File;
 use std::io::{self, Read};
 
@@ -30,30 +29,19 @@ pub fn sha1_hash(path: &str) -> io::Result<String> {
     compute_hash::<Sha1>(path)
 }
 
-#[allow(dead_code)]
-pub fn blake2b512_hash(path: &str) -> io::Result<String> {
-    compute_hash::<Blake2b512>(path)
-}
-
-#[allow(dead_code)]
-pub fn sha224_hash(path: &str) -> io::Result<String> {
-    compute_hash::<Sha224>(path)
-}
-
 pub fn sha256_hash(path: &str) -> io::Result<String> {
     compute_hash::<Sha256>(path)
-}
-
-#[allow(dead_code)]
-pub fn sha384_hash(path: &str) -> io::Result<String> {
-    compute_hash::<Sha384>(path)
 }
 
 pub fn sha512_hash(path: &str) -> io::Result<String> {
     compute_hash::<Sha512>(path)
 }
 
-pub fn verify_checksum(metadata: &Metadata, file_path: &str, source_index: usize) -> io::Result<()> {
+pub fn verify_checksum(
+    metadata: &Metadata,
+    file_path: &str,
+    source_index: usize,
+) -> io::Result<()> {
     let (expected_hashes, actual, algo_name) = if !metadata.sha512sums.is_empty() {
         (&metadata.sha512sums, sha512_hash(file_path)?, "SHA512")
     } else if !metadata.sha256sums.is_empty() {
@@ -65,7 +53,9 @@ pub fn verify_checksum(metadata: &Metadata, file_path: &str, source_index: usize
     } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("no checksums found in metadata for {file_path}; refusing to process unverified source"),
+            format!(
+                "no checksums found in metadata for {file_path}; refusing to process unverified source"
+            ),
         ));
     };
 
@@ -90,7 +80,9 @@ pub fn verify_checksum(metadata: &Metadata, file_path: &str, source_index: usize
     if expected.eq_ignore_ascii_case("SKIP") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("checksum verification cannot be skipped for {file_path}; provide a genuine cryptographic hash"),
+            format!(
+                "checksum verification cannot be skipped for {file_path}; provide a genuine cryptographic hash"
+            ),
         ));
     }
 
@@ -113,7 +105,9 @@ pub fn verify_checksum_value(file_path: &str, expected: &str) -> io::Result<()> 
     if expected.eq_ignore_ascii_case("SKIP") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("checksum verification cannot be skipped for {file_path}; provide a genuine cryptographic hash"),
+            format!(
+                "checksum verification cannot be skipped for {file_path}; provide a genuine cryptographic hash"
+            ),
         ));
     }
 
@@ -186,8 +180,8 @@ mod tests {
         let (_guard, path) = temp_test_file("empty", b"test payload");
         let meta = Metadata::default();
 
-        let err = verify_checksum(&meta, &path, 0)
-            .expect_err("empty checksum array must be rejected");
+        let err =
+            verify_checksum(&meta, &path, 0).expect_err("empty checksum array must be rejected");
         assert!(err.to_string().contains("no checksums found"));
     }
 
@@ -207,7 +201,9 @@ mod tests {
     fn test_verify_checksum_detects_mismatch() {
         let (_guard, path) = temp_test_file("mismatch", b"secure data");
         let meta = Metadata {
-            sha256sums: vec!["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()],
+            sha256sums: vec![
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            ],
             ..Default::default()
         };
 
