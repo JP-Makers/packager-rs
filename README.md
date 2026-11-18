@@ -22,12 +22,12 @@ A fast, pure-Rust multi-format packaging engine and library. Package CLI utiliti
 | **Arch Linux (ALPM)**| `.pkg.tar.zst` | Linux | **Production** | Pure Rust (`alpm-package`, `.PKGINFO`, `.BUILDINFO` v2, `.MTREE`) |
 | **Fedora / RHEL / SUSE** | `.rpm` | Linux | **Production** | Pure Rust (RPM v4, gzip payload, auto `%post`/`%postun` scriptlets) |
 | **Standalone Portable**| `.AppImage` | Linux | **Production** | Pure Rust (embedded ELF runtime + SquashFS payload + `.DirIcon`) |
-| **FreeBSD Package** | `.pkg` | FreeBSD | **Production** | Pure Rust (Zstandard tar archive + UCL/JSON `+MANIFEST`) |
 | **Cryptographic Signer**| `.asc` / `.sig` | All | **Production** | Pure Rust Ed25519 OpenPGP, `zsync` deltas, and `SHA256SUMS.txt` |
-| **Canonical Snap** | `.snap` | Linux | **Sideload / Store** | Pure Rust (SquashFS + `meta/snap.yaml` with hardware plugs) |
-| **OCI Container** | Directory layout / blobs | Universal | **Image Layout v1** | Pure Rust OCI image layout (`oci-layout`, `index.json`, `blobs/sha256/*`) |
-| **Flatpak** | `.flatpak.tar.gz` / `.json` | Linux | **Manifest & Archive** | Valid manifest for `flatpak-builder` / Flathub and `.flatpak.tar.gz` payload |
-| **Windows Installer** | `.msi` | Windows | **Experimental** | Pure Rust CFB/CAB database (MSI) |
+| **Canonical Snap** | `.snap` | Linux | **Beta** | Pure Rust (SquashFS + `meta/snap.yaml` with configurable plugs) |
+| **Flatpak** | `.flatpak.tar.gz` / `.json` | Linux | **Beta** | Valid manifest for `flatpak-builder` / Flathub and `.flatpak.tar.gz` payload |
+| **OCI Container** | Directory layout / blobs | Universal | **Beta** | Pure Rust OCI image layout (`oci-layout`, `index.json`, `blobs/sha256/*`) |
+| **FreeBSD Package** | `.pkg` | FreeBSD | **Beta** | Pure Rust (Zstandard tar archive + UCL/JSON `+MANIFEST`) |
+| **Windows Installer** | `.msi` | Windows | **Experimental** | Pure Rust CFB/CAB database (MSI) with MSZIP compression |
 | **macOS Disk Image** | `.dmg` | macOS | **Experimental** | Pure Rust UDIF container (Gatekeeper requires macOS `codesign`) |
 
 ---
@@ -201,8 +201,28 @@ install -m<mode> "[local:]<source_file>" to "<destination_path>"
 ## Known Limitations
 
 - **Cross-Platform Payload Gating**: Mac (`.dmg`) and Windows (`.msi`) builders require real native binaries (Mach-O and PE executables respectively). Packaging a Linux ELF binary as a DMG or MSI is strictly rejected. `[build.mac]` and `[build.windows]` are disabled by default in `metadata.toml` until dedicated platform sources and checksums are supplied.
-- **Code Signing**: Windows Authenticode and macOS Developer ID / Notarization are not embedded in pure Rust; release artifacts for macOS and Windows are cataloged in `SHA256SUMS.txt` and signed via Ed25519 OpenPGP signatures. Native signing requires platform-specific host tools (`codesign`, `signtool`).
-- **Signing Key Protection**: Unencrypted secret keys in default directories emit a security warning. Set `PACKAGER_KEY_PASSPHRASE` (or `KEYGEN_PASSPHRASE`) in your environment to protect signing keys with passphrase-derived encryption.
+- **Code Signing**: Windows Authenticode and macOS Developer ID / Notarization are not embedded in pure Rust; release artifacts for macOS and Windows are cataloged in `SHA256SUMS.txt` and signed via Ed25519 OpenPGP signatures. Native signing requires platform-specific post-build tools:
+
+  **macOS Code Signing & Notarization:**
+  ```bash
+  # Sign inner application bundle and outer disk image
+  codesign --deep --force --options runtime --sign "Developer ID Application: Your Name (TEAMID)" "output/YourApp.app"
+  codesign --force --sign "Developer ID Application: Your Name (TEAMID)" "output/YourApp.dmg"
+
+  # Submit for Apple notarization and staple ticket
+  xcrun notarytool submit "output/YourApp.dmg" --keychain-profile "notary-profile" --wait
+  xcrun stapler staple "output/YourApp.dmg"
+  ```
+
+  **Windows Authenticode Signing:**
+  ```bash
+  # Using Windows SDK signtool
+  signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 /a "output\YourApp.msi"
+
+  # Using cross-platform osslsigncode (Linux / macOS)
+  osslsigncode sign -certs cert.spc -key key.pvk -t http://timestamp.digicert.com -in "output/YourApp.msi" -out "output/YourApp-signed.msi"
+  ```
+- **Signing Key Protection**: Secret keys are stored in a dedicated key directory (`$XDG_CONFIG_HOME/packager/<app>/keys` or `PACKAGER_KEY_DIR`) fenced with strict `0700`/`0600` permissions. Ensure key directories and private keys are never committed to public repositories.
 
 ---
 

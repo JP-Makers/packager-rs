@@ -35,7 +35,7 @@ pub fn squashfs_build_to_file(
     let dir_header = NodeHeader::new(0o755, 0, 0, 0);
     let symlink_header = NodeHeader::new(0o777, 0, 0, 0);
 
-    for entry in WalkDir::new(app_dir).min_depth(1) {
+    for entry in WalkDir::new(app_dir).min_depth(1).sort_by_file_name() {
         let entry = entry?;
         let rel_path = entry.path().strip_prefix(app_dir)?;
 

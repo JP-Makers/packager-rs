@@ -40,11 +40,15 @@ pub fn deb_package(
         metadata.version, metadata.release
     )?;
     writeln!(control_file, "Architecture: {}", architecture)?;
-    writeln!(
-        control_file,
-        "Maintainer: {} <{}>",
-        metadata.maintainer, metadata.email
-    )?;
+    if metadata.email.is_empty() {
+        writeln!(control_file, "Maintainer: {}", metadata.maintainer)?;
+    } else {
+        writeln!(
+            control_file,
+            "Maintainer: {} <{}>",
+            metadata.maintainer, metadata.email
+        )?;
+    }
     writeln!(control_file, "Installed-Size: {}", installed_size_kib)?;
     if !metadata.deb_depends.is_empty() {
         writeln!(control_file, "Depends: {}", metadata.deb_depends.join(", "))?;
@@ -69,7 +73,7 @@ pub fn deb_package(
     let mut md5sums_entries: Vec<(String, String)> = Vec::new();
     let mut data_files: Vec<(PathBuf, PathBuf)> = Vec::new(); // (abs_path, rel_path)
 
-    for entry in walkdir::WalkDir::new(&base_dir) {
+    for entry in walkdir::WalkDir::new(&base_dir).sort_by_file_name() {
         let entry = entry?;
         let path = entry.path().to_path_buf();
         let rel_path = path.strip_prefix(&base_dir)?.to_path_buf();
@@ -213,6 +217,18 @@ fi\n"
 fn add_file_to_ar<W: Write>(ar: &mut ar::Builder<W>, path: &Path, name: &str) -> io::Result<()> {
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
-    let header = ar::Header::from_metadata(name.as_bytes().to_vec(), &metadata);
+    let mtime = crate::repro::source_date_epoch().unwrap_or_else(|| {
+        metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    });
+    let mut header = ar::Header::new(name.as_bytes().to_vec(), metadata.len());
+    header.set_mtime(mtime);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mode(0o100644);
     ar.append(&header, &mut file)
 }

@@ -5,6 +5,7 @@ mod bundle;
 mod checksum;
 mod chmod;
 mod clone;
+mod error;
 mod metadata;
 mod payload;
 mod repro;
@@ -17,7 +18,7 @@ pub use bundle::keygen::{
     run_keygen, run_keygen_with_key_dir, sign_bytes, validate_ed25519_signature, verify_signature,
 };
 pub use bundle::linux::alpm::alpm_package;
-pub use bundle::linux::appimage::appimage_package;
+pub use bundle::linux::appimage::{EMBEDDED_RUNTIMES, EmbeddedRuntimeInfo, appimage_package};
 pub use bundle::linux::deb::deb_package;
 pub use bundle::linux::flatpak::{
     FlatpakApplication, FlatpakArchitecture, FlatpakBuildSystem, FlatpakManifestFormat,
@@ -34,11 +35,44 @@ pub use bundle::windows::msi_package;
 pub use checksum::{
     md5_hash, sha1_hash, sha256_hash, sha512_hash, verify_checksum, verify_checksum_value,
 };
-#[allow(deprecated)]
-pub use chmod::{chmod_package, chmod_package_with_metadata};
-pub use clone::fetch_source;
+pub use chmod::chmod_package_with_metadata;
+pub use clone::{fetch_source, fetch_source_with_base};
+pub use error::PackagerError;
 pub use metadata::{BuildPlatforms, Metadata, PlatformBuildConfig, PlatformTarget};
 pub use unpack::unpack_source;
+
+/// Target platform and format selection.
+#[derive(Debug, Clone, Default)]
+pub struct PlatformSelection {
+    pub all: bool,
+    pub deb: bool,
+    pub appimage: bool,
+    pub rpm: bool,
+    pub alpm: bool,
+    pub snap: bool,
+    pub flatpak: bool,
+    pub dmg: bool,
+    pub msi: bool,
+    pub freebsd: bool,
+    pub oci: bool,
+}
+
+impl PlatformSelection {
+    /// True if no specific format flags were set or `--all` was explicitly requested.
+    pub fn is_all(&self) -> bool {
+        self.all
+            || (!self.deb
+                && !self.appimage
+                && !self.rpm
+                && !self.alpm
+                && !self.snap
+                && !self.flatpak
+                && !self.dmg
+                && !self.msi
+                && !self.freebsd
+                && !self.oci)
+    }
+}
 
 /// Results containing paths to all packages built by `PackageBuilder`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -79,13 +113,13 @@ impl BuildResults {
     }
 
     /// Serialize results to a formatted YAML string.
-    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
-        serde_yaml::to_string(self)
+    pub fn to_yaml(&self) -> Result<String, serde_yml::Error> {
+        serde_yml::to_string(self)
     }
 
     /// Deserialize results from a YAML string.
-    pub fn from_yaml(s: &str) -> Result<Self, serde_yaml::Error> {
-        serde_yaml::from_str(s)
+    pub fn from_yaml(s: &str) -> Result<Self, serde_yml::Error> {
+        serde_yml::from_str(s)
     }
 
     /// Serialize results to a formatted TOML string.
@@ -180,9 +214,18 @@ impl PackageBuilder {
 
         // Verify checksums of any sources that already exist locally on disk
         for (index, source) in self.metadata.sources.iter().enumerate() {
-            let path = Path::new(source);
+            let path = if let Some(ref mdir) = self.metadata.manifest_dir {
+                let candidate = mdir.join(source);
+                if candidate.exists() {
+                    candidate
+                } else {
+                    PathBuf::from(source)
+                }
+            } else {
+                PathBuf::from(source)
+            };
             if path.exists() {
-                verify_checksum(&self.metadata, source, index)?;
+                verify_checksum(&self.metadata, path.to_str().unwrap_or(source), index)?;
             }
         }
 
@@ -198,9 +241,22 @@ impl PackageBuilder {
                 if let Some(cfg) = cfg_opt {
                     let platform_meta = self.metadata.for_platform(target);
                     for (index, source) in cfg.sources.iter().enumerate() {
-                        let path = Path::new(source);
+                        let path = if let Some(ref mdir) = platform_meta.manifest_dir {
+                            let candidate = mdir.join(source);
+                            if candidate.exists() {
+                                candidate
+                            } else {
+                                PathBuf::from(source)
+                            }
+                        } else {
+                            PathBuf::from(source)
+                        };
                         if path.exists() {
-                            verify_checksum(&platform_meta, source, index)?;
+                            verify_checksum(
+                                &platform_meta,
+                                path.to_str().unwrap_or(source),
+                                index,
+                            )?;
                         }
                     }
                 }
@@ -216,7 +272,7 @@ impl PackageBuilder {
         source: &str,
         index: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let filename = fetch_source(source).await?;
+        let filename = clone::fetch_source_with_base(source, meta.manifest_dir.as_deref()).await?;
         verify_checksum(meta, &filename, index)?;
         Self::unpack_archive(&filename, meta.workdir())?;
         Ok(())
@@ -343,56 +399,6 @@ impl PackageBuilder {
         self.ensure_platform_enabled(PlatformTarget::Linux, "OCI manifest")?;
         let meta = self.metadata.for_platform(PlatformTarget::Linux);
         oci_package(&meta, &self.output_dir)
-    }
-
-    /// Backwards-compatible alias for `oci_package`.
-    pub fn build_oci(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.oci_package()
-    }
-
-    /// Backwards-compatible alias for `alpm_package`.
-    pub fn build_alpm(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.alpm_package()
-    }
-
-    /// Backwards-compatible alias for `appimage_package`.
-    pub fn build_appimage(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.appimage_package()
-    }
-
-    /// Backwards-compatible alias for `deb_package`.
-    pub fn build_deb(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.deb_package()
-    }
-
-    /// Backwards-compatible alias for `rpm_package`.
-    pub fn build_rpm(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.rpm_package()
-    }
-
-    /// Backwards-compatible alias for `snap_package`.
-    pub fn build_snap(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.snap_package()
-    }
-
-    /// Backwards-compatible alias for `flatpak_package`.
-    pub fn build_flatpak(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.flatpak_package()
-    }
-
-    /// Backwards-compatible alias for `dmg_package`.
-    pub fn build_dmg(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.dmg_package()
-    }
-
-    /// Backwards-compatible alias for `msi_package`.
-    pub fn build_msi(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.msi_package()
-    }
-
-    /// Backwards-compatible alias for `freebsd_package`.
-    pub fn build_freebsd(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        self.freebsd_package()
     }
 
     /// Run keygen to sign packages, produce SHA256SUMS.txt, and export release signing key.
@@ -570,6 +576,108 @@ impl PackageBuilder {
             oci,
             keygen,
         })
+    }
+
+    /// Return preview of what would be packaged and where (dry-run mode).
+    pub fn dry_run(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Dry run for {} v{}:",
+            self.metadata.name, self.metadata.version
+        ));
+        lines.push(format!("  Output directory: {}", self.output_dir.display()));
+        lines.push("  Package instructions:".to_string());
+        for instr in &self.metadata.package_instructions {
+            lines.push(format!("    [install] {}", instr));
+        }
+        lines
+    }
+
+    /// Build selected package formats based on the provided selection.
+    pub async fn build_selected(
+        &self,
+        selection: &PlatformSelection,
+    ) -> Result<Vec<(&'static str, PathBuf)>, Box<dyn std::error::Error>> {
+        let build_all = selection.is_all();
+        let linux_enabled = self.metadata.platform_enabled(PlatformTarget::Linux);
+        let mac_enabled = self.metadata.platform_enabled(PlatformTarget::Mac);
+        let windows_enabled = self.metadata.platform_enabled(PlatformTarget::Windows);
+        let freebsd_enabled = self.metadata.platform_enabled(PlatformTarget::FreeBsd);
+
+        if build_all {
+            for (target, enabled) in [
+                (PlatformTarget::Linux, linux_enabled),
+                (PlatformTarget::Mac, mac_enabled),
+                (PlatformTarget::Windows, windows_enabled),
+                (PlatformTarget::FreeBsd, freebsd_enabled),
+            ] {
+                if !enabled {
+                    println!("Skipping platform '{target}': [build.{target}] enabled = false");
+                }
+            }
+        }
+
+        let build_deb = (build_all && linux_enabled) || selection.deb;
+        let build_appimage = (build_all && linux_enabled) || selection.appimage;
+        let build_rpm = (build_all && linux_enabled) || selection.rpm;
+        let build_alpm = (build_all && linux_enabled) || selection.alpm;
+        let build_snap = (build_all && linux_enabled) || selection.snap;
+        let build_flatpak = (build_all && linux_enabled) || selection.flatpak;
+        let build_dmg = (build_all && mac_enabled) || selection.dmg;
+        let build_msi = (build_all && windows_enabled) || selection.msi;
+        let build_freebsd = (build_all && freebsd_enabled) || selection.freebsd;
+        let build_oci = (build_all && linux_enabled) || selection.oci;
+
+        println!(
+            "Building packages for {} v{}...",
+            self.metadata.name, self.metadata.version
+        );
+
+        self.fetch_and_unpack().await?;
+
+        let mut generated = Vec::new();
+        if build_alpm {
+            let p = self.alpm_package()?;
+            generated.push(("Arch / ALPM", p));
+        }
+        if build_appimage {
+            let p = self.appimage_package()?;
+            generated.push(("AppImage", p));
+        }
+        if build_deb {
+            let p = self.deb_package()?;
+            generated.push(("Debian", p));
+        }
+        if build_rpm {
+            let p = self.rpm_package()?;
+            generated.push(("RPM", p));
+        }
+        if build_snap {
+            let p = self.snap_package()?;
+            generated.push(("Snap", p));
+        }
+        if build_flatpak {
+            let p = self.flatpak_package()?;
+            generated.push(("Flatpak", p));
+        }
+        if build_dmg {
+            let p = self.dmg_package()?;
+            generated.push(("macOS DMG", p));
+        }
+        if build_msi {
+            let p = self.msi_package()?;
+            generated.push(("Windows MSI", p));
+        }
+        if build_freebsd {
+            let p = self.freebsd_package()?;
+            generated.push(("FreeBSD PKG", p));
+        }
+        if build_oci {
+            let p = self.oci_package()?;
+            generated.push(("OCI Manifest", p));
+        }
+
+        Ok(generated)
     }
 }
 

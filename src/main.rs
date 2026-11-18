@@ -1,5 +1,5 @@
 use clap::Parser;
-use packager_rs::{PackageBuilder, PlatformTarget};
+use packager_rs::{PackageBuilder, PlatformSelection};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -66,9 +66,13 @@ struct Cli {
     #[arg(long)]
     all: bool,
 
-    /// Validate metadata and verify/fetch sources without building packages
+    /// Validate manifest syntax and verify local sources without mutating work tree
     #[arg(short = 'c', long)]
     check: bool,
+
+    /// Preview package instructions and layout without generating package artifacts
+    #[arg(long, visible_alias = "list")]
+    dry_run: bool,
 
     /// Move finished packages to ~/package-builder after build
     #[arg(long)]
@@ -118,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // If check flag is provided, validate metadata and existing local sources without mutating work tree
     if cli.check {
         println!(
-            "Validating metadata and verifying sources for {} v{}...",
+            "Validating metadata and verifying local sources for {} v{}...",
             builder.metadata.name, builder.metadata.version
         );
         builder.check()?;
@@ -126,100 +130,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Determine target formats to build
-    let build_all = cli.all
-        || (!cli.deb
-            && !cli.appimage
-            && !cli.rpm
-            && !cli.alpm
-            && !cli.snap
-            && !cli.flatpak
-            && !cli.dmg
-            && !cli.msi
-            && !cli.freebsd
-            && !cli.oci);
-
-    let linux_enabled = builder.metadata.platform_enabled(PlatformTarget::Linux);
-    let mac_enabled = builder.metadata.platform_enabled(PlatformTarget::Mac);
-    let windows_enabled = builder.metadata.platform_enabled(PlatformTarget::Windows);
-    let freebsd_enabled = builder.metadata.platform_enabled(PlatformTarget::FreeBsd);
-
-    if build_all {
-        for (target, enabled) in [
-            (PlatformTarget::Linux, linux_enabled),
-            (PlatformTarget::Mac, mac_enabled),
-            (PlatformTarget::Windows, windows_enabled),
-            (PlatformTarget::FreeBsd, freebsd_enabled),
-        ] {
-            if !enabled {
-                println!("Skipping platform '{target}': [build.{target}] enabled = false");
-            }
+    if cli.dry_run {
+        for line in builder.dry_run() {
+            println!("{}", line);
         }
+        return Ok(());
     }
 
-    // Disabled platforms are skipped during a default/all build. An explicit
-    // flag still reaches the gated builder and fails with a clear error.
-    let build_deb = (build_all && linux_enabled) || cli.deb;
-    let build_appimage = (build_all && linux_enabled) || cli.appimage;
-    let build_rpm = (build_all && linux_enabled) || cli.rpm;
-    let build_alpm = (build_all && linux_enabled) || cli.alpm;
-    let build_snap = (build_all && linux_enabled) || cli.snap;
-    let build_flatpak = (build_all && linux_enabled) || cli.flatpak;
-    let build_dmg = (build_all && mac_enabled) || cli.dmg;
-    let build_msi = (build_all && windows_enabled) || cli.msi;
-    let build_freebsd = (build_all && freebsd_enabled) || cli.freebsd;
-    let build_oci = (build_all && linux_enabled) || cli.oci;
+    let selection = PlatformSelection {
+        all: cli.all,
+        deb: cli.deb,
+        appimage: cli.appimage,
+        rpm: cli.rpm,
+        alpm: cli.alpm,
+        snap: cli.snap,
+        flatpak: cli.flatpak,
+        dmg: cli.dmg,
+        msi: cli.msi,
+        freebsd: cli.freebsd,
+        oci: cli.oci,
+    };
 
-    println!(
-        "Building packages for {} v{}...",
-        builder.metadata.name, builder.metadata.version
-    );
-
-    // Fetch and unpack sources
-    builder.fetch_and_unpack().await?;
-
-    let mut generated = Vec::new();
-
-    if build_alpm {
-        let p = builder.alpm_package()?;
-        generated.push(("Arch / ALPM", p));
-    }
-    if build_appimage {
-        let p = builder.appimage_package()?;
-        generated.push(("AppImage", p));
-    }
-    if build_deb {
-        let p = builder.deb_package()?;
-        generated.push(("Debian", p));
-    }
-    if build_rpm {
-        let p = builder.rpm_package()?;
-        generated.push(("RPM", p));
-    }
-    if build_snap {
-        let p = builder.snap_package()?;
-        generated.push(("Snap", p));
-    }
-    if build_flatpak {
-        let p = builder.flatpak_package()?;
-        generated.push(("Flatpak", p));
-    }
-    if build_dmg {
-        let p = builder.dmg_package()?;
-        generated.push(("macOS DMG", p));
-    }
-    if build_msi {
-        let p = builder.msi_package()?;
-        generated.push(("Windows MSI", p));
-    }
-    if build_freebsd {
-        let p = builder.freebsd_package()?;
-        generated.push(("FreeBSD PKG", p));
-    }
-    if build_oci {
-        let p = builder.oci_package()?;
-        generated.push(("OCI Manifest", p));
-    }
+    let generated = builder.build_selected(&selection).await?;
 
     println!("\n=== Generated Packages ===");
     for (name, path) in &generated {

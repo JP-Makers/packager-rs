@@ -126,6 +126,54 @@ fn locate_icon(metadata: &Metadata, staged_root: &Path) -> Option<(PathBuf, Stri
     None
 }
 
+/// Validate the standard macOS `.app` bundle layout:
+/// - `Contents/Info.plist` exists and is non-empty
+/// - `Contents/PkgInfo` exists
+/// - `Contents/MacOS/<executable>` exists, is a file, and has executable permission
+pub fn validate_app_bundle(
+    bundle_dir: &Path,
+    exec_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let contents = bundle_dir.join("Contents");
+    if !contents.is_dir() {
+        return Err(
+            format!("invalid .app bundle: missing Contents directory at {contents:?}").into(),
+        );
+    }
+
+    let info_plist = contents.join("Info.plist");
+    if !info_plist.is_file() || fs::metadata(&info_plist)?.len() == 0 {
+        return Err(
+            format!("invalid .app bundle: missing or empty Info.plist at {info_plist:?}").into(),
+        );
+    }
+
+    let pkg_info = contents.join("PkgInfo");
+    if !pkg_info.is_file() {
+        return Err(format!("invalid .app bundle: missing PkgInfo at {pkg_info:?}").into());
+    }
+
+    let exec_path = contents.join("MacOS").join(exec_name);
+    if !exec_path.is_file() {
+        return Err(
+            format!("invalid .app bundle: missing main executable at {exec_path:?}").into(),
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        let perms = fs::metadata(&exec_path)?.permissions();
+        if perms.mode() & 0o111 == 0 {
+            return Err(format!(
+                "invalid .app bundle: main executable {exec_path:?} lacks executable permissions"
+            )
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
 /// Package the application into a native macOS Apple Disk Image (`.dmg`) in pure Rust.
 pub fn dmg_package(
     metadata: &Metadata,
@@ -175,6 +223,16 @@ pub fn dmg_package(
         .into());
     }
 
+    let declared_arch = metadata.primary_arch();
+    if !crate::payload::macho_matches_arch(&exec_bytes, declared_arch) {
+        return Err(format!(
+            "refusing to build DMG: executable {:?} does not match declared architecture '{}'",
+            exec_source.display(),
+            declared_arch
+        )
+        .into());
+    }
+
     let target_exec = macos_dir.join(&exec_filename);
     fs::copy(&exec_source, &target_exec)?;
     #[cfg(unix)]
@@ -199,6 +257,9 @@ pub fn dmg_package(
 
     let pkg_info_path = contents_dir.join("PkgInfo");
     fs::write(&pkg_info_path, generate_pkg_info())?;
+
+    // Validate the staged .app bundle layout before packaging
+    validate_app_bundle(&app_bundle_dir, &exec_filename)?;
 
     // Step 5b: Copy optional Credits.rtf and NOTICE into Resources if present
     for (filename, dest_name) in &[
@@ -301,6 +362,7 @@ mod tests {
     fn macho_payload() -> Vec<u8> {
         let mut bytes = vec![0u8; 64];
         bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        bytes[4..8].copy_from_slice(&0x01000007u32.to_le_bytes()); // CPU_TYPE_X86_64
         bytes
     }
 

@@ -25,6 +25,12 @@ pub fn create_build_info(
         buildenv_str.push_str(&format!("buildenv = {}\n", opt));
     }
 
+    let packager_str = if metadata.email.is_empty() {
+        metadata.maintainer.clone()
+    } else {
+        format!("{} <{}>", metadata.maintainer, metadata.email)
+    };
+
     let buildinfo_data = format!(
         r#"format = 2
 pkgname = {}
@@ -32,7 +38,7 @@ pkgbase = {}
 pkgver = {}-{}
 pkgarch = {}
 pkgbuild_sha256sum = {}
-packager = {} <{}>
+packager = {}
 builddate = {}
 builddir = /build
 startdir = /startdir/
@@ -45,8 +51,7 @@ buildtoolver = 1:1.2.1-1-any
         metadata.release,
         metadata.arch.first().unwrap_or(&"any".to_string()),
         metadata.metadata_sha256sum,
-        metadata.maintainer,
-        metadata.email,
+        packager_str,
         get_build_date(),
         buildenv_str
     );

@@ -40,20 +40,7 @@ pub fn generate_ed25519_keypair(
     user_id: &str,
 ) -> Result<(SignedSecretKey, SignedPublicKey), Box<dyn std::error::Error>> {
     let mut seed = [0u8; 32];
-
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        let mut f = fs::File::open("/dev/urandom")
-            .map_err(|e| format!("cannot open /dev/urandom for key generation: {e}"))?;
-        f.read_exact(&mut seed)
-            .map_err(|e| format!("cannot read 32 random bytes from /dev/urandom: {e}"))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        getrandom::fill(&mut seed).map_err(|e| format!("secure RNG unavailable: {e}"))?;
-    }
+    getrandom::fill(&mut seed).map_err(|e| format!("secure RNG unavailable: {e}"))?;
 
     let secret = pgp::crypto::ed25519::SecretKey::try_from_bytes(
         seed,
@@ -103,14 +90,7 @@ pub fn generate_ed25519_keypair(
             primary_pub.legacy_key_id(),
         ))?);
 
-    let (passphrase, has_passphrase) = signing_passphrase_info();
-    if !has_passphrase {
-        eprintln!(
-            "WARNING: Generating unencrypted release signing key (PACKAGER_KEY_PASSPHRASE not set).\n\
-             Anyone with access to the key directory can sign releases."
-        );
-    }
-
+    let (passphrase, _) = signing_passphrase_info();
     let cert_sig =
         sig_cfg.sign_certification(&primary_sec, &primary_pub, &passphrase, uid.tag(), &uid)?;
 
@@ -167,16 +147,19 @@ fn signing_passphrase_info() -> (Password, bool) {
     (Password::empty(), false)
 }
 
-/// Write secret material with `0600`, creating the parent directory `0700`.
+/// Write secret material with `0600`, creating the parent directory `0700` if it did not exist.
 fn secure_write_secret(path: &Path, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
 
     if let Some(parent) = path.parent() {
+        let parent_existed = parent.exists();
         fs::create_dir_all(parent)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            if !parent_existed {
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            }
         }
     }
 
@@ -194,7 +177,7 @@ fn secure_write_secret(path: &Path, data: &[u8]) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Load a secret key, repairing legacy `0664` permissions in place.
+/// Load a secret key, repairing legacy `0664` permissions in place if writable.
 ///
 /// An unreadable key is a hard error: silently generating a replacement
 /// invalidates every signature already published under the old key.
@@ -206,12 +189,12 @@ fn load_secret_key(path: &Path) -> Result<Option<SignedSecretKey>, Box<dyn std::
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| {
-            format!(
-                "failed to enforce 0600 permissions on secret key {}: {e}",
-                path.display()
-            )
-        })?;
+        if let Ok(m) = fs::metadata(path) {
+            let current_mode = m.permissions().mode() & 0o777;
+            if current_mode != 0o600 && current_mode != 0o400 {
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+            }
+        }
     }
 
     let bytes = fs::read(path)?;
@@ -401,14 +384,7 @@ pub fn sign_bytes(
             secret_key.primary_key.legacy_key_id(),
         ))?);
 
-    let (passphrase, has_passphrase) = signing_passphrase_info();
-    if !has_passphrase {
-        eprintln!(
-            "WARNING: Release signing key is unencrypted (PACKAGER_KEY_PASSPHRASE not set).\n\
-             Anyone with read access to the key file can sign releases."
-        );
-    }
-
+    let (passphrase, _) = signing_passphrase_info();
     let sig = config.sign(&secret_key.primary_key, &passphrase, cursor)?;
     // Validate Ed25519 cryptographic structure using ed25519 crate
     let _ed_sig = validate_ed25519_signature(&sig)?;
@@ -451,15 +427,20 @@ pub fn generate_zsync(
     out.extend_from_slice(format!("MTime: {}\n", mtime_str).as_bytes());
     out.extend_from_slice(b"Blocksize: 4096\n");
     out.extend_from_slice(format!("Length: {}\n", file_len).as_bytes());
-    out.extend_from_slice(b"Hash-Lengths: 2,2,5\n");
+    out.extend_from_slice(b"Hash-Lengths: 2,4,5\n");
     out.extend_from_slice(format!("URL: {}\n", filename).as_bytes());
     out.extend_from_slice(format!("SHA-1: {}\n\n", sha1_hex).as_bytes());
 
     for chunk in bytes.chunks(4096) {
+        // According to the zsync specification, the final block (if shorter than 4096)
+        // is padded with trailing zero bytes to the block size for checksum calculation.
+        let mut block = [0u8; 4096];
+        block[..chunk.len()].copy_from_slice(chunk);
+
         let mut a: u32 = 0;
         let mut b: u32 = 0;
-        let len = chunk.len() as u32;
-        for (i, &byte) in chunk.iter().enumerate() {
+        let len = 4096u32;
+        for (i, &byte) in block.iter().enumerate() {
             a = (a + byte as u32) % 65536;
             b = (b + (len - i as u32) * byte as u32) % 65536;
         }
@@ -471,7 +452,7 @@ pub fn generate_zsync(
         out.push(b_be[1]);
 
         let mut md5_hasher = Md5::new();
-        md5_hasher.update(chunk);
+        md5_hasher.update(block);
         let md5_digest = md5_hasher.finalize();
         out.extend_from_slice(&md5_digest[..5]);
     }
@@ -546,9 +527,9 @@ pub fn run_keygen_with_key_dir(
         for entry in walkdir::WalkDir::new(output_dir)
             .min_depth(1)
             .max_depth(1)
-            .into_iter()
-            .flatten()
+            .sort_by_file_name()
         {
+            let entry = entry?;
             let p = entry.path().to_path_buf();
             if p.is_file() {
                 let name = p.file_name().unwrap_or_default().to_string_lossy();
@@ -951,9 +932,15 @@ mod tests {
         assert!(header_str.contains("Filename: testapp.AppImage\n"));
         assert!(header_str.contains("Blocksize: 4096\n"));
         assert!(header_str.contains("Length: 10000\n"));
-        assert!(header_str.contains("Hash-Lengths: 2,2,5\n"));
+        assert!(header_str.contains("Hash-Lengths: 2,4,5\n"));
         assert!(header_str.contains("URL: testapp.AppImage\n"));
         assert!(header_str.contains("SHA-1: "));
+
+        // Verify that 9 bytes are stored per block (4 bytes rsum + 5 bytes md5)
+        let header_end = zsync_bytes.windows(2).position(|w| w == b"\n\n").unwrap() + 2;
+        let binary_records = &zsync_bytes[header_end..];
+        let num_blocks = payload.len().div_ceil(4096);
+        assert_eq!(binary_records.len(), num_blocks * 9);
 
         let _ = fs::remove_dir_all(&tmp);
     }

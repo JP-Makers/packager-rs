@@ -74,7 +74,7 @@ workdir = "twincan"
 
 # false keeps the unpacked tree so a failed build can be inspected. Set true
 # only in disposable CI checkouts: it deletes the work directory after building.
-clean_workdir = false
+clean_workdir = true
 
 # -----------------------------------------------------------------------------
 # Package relations

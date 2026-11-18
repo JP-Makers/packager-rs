@@ -1,4 +1,4 @@
-use super::metadata::{self, Metadata};
+use super::metadata::Metadata;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -122,15 +122,33 @@ pub fn chmod_package_with_metadata(
     fs::create_dir_all(base_dir)?;
 
     for line in &metadata.package_instructions {
-        process_install_line(line, base_dir, metadata.workdir(), false)?;
+        process_install_line(
+            line,
+            base_dir,
+            metadata.workdir(),
+            false,
+            metadata.manifest_dir.as_deref(),
+        )?;
     }
 
     if is_appimage {
         for line in &metadata.appimage_icon_instructions {
-            process_install_line(line, base_dir, metadata.workdir(), true)?;
+            process_install_line(
+                line,
+                base_dir,
+                metadata.workdir(),
+                true,
+                metadata.manifest_dir.as_deref(),
+            )?;
         }
         for line in &metadata.appimage_desktop_instructions {
-            process_install_line(line, base_dir, metadata.workdir(), true)?;
+            process_install_line(
+                line,
+                base_dir,
+                metadata.workdir(),
+                true,
+                metadata.manifest_dir.as_deref(),
+            )?;
         }
     }
 
@@ -138,45 +156,53 @@ pub fn chmod_package_with_metadata(
     Ok(())
 }
 
-#[deprecated(note = "use chmod_package_with_metadata instead")]
-pub fn chmod_package(pkg_dir: &str, is_appimage: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = metadata::extract_metadata("metadata.toml")?;
-    chmod_package_with_metadata(&metadata, Path::new(pkg_dir), is_appimage)
-}
-
 fn process_install_line(
     line: &str,
     base_dir: &Path,
     metadata_name: &str,
     default_to_root: bool,
+    manifest_dir: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let trimmed = line.trim();
-    if !trimmed.starts_with("install") {
-        return Ok(());
-    }
-
     let parts = tokenize_line(trimmed)?;
+    if parts.is_empty() || parts[0] != "install" {
+        return Err(format!("directive must start with 'install': {line:?}").into());
+    }
     if parts.len() < 2 {
-        return Ok(());
+        return Err(format!("install directive missing arguments: {line:?}").into());
     }
 
     // Mode
     let mut current_idx = 1;
-    let mode_str = if current_idx < parts.len() && parts[current_idx].starts_with("-m") {
+    let (mode, mode_str) = if current_idx < parts.len() && parts[current_idx].starts_with("-m") {
         let m = parts[current_idx].trim_start_matches("-m");
         current_idx += 1;
-        m
+        if m.is_empty() || !m.chars().all(|c| matches!(c, '0'..='7')) {
+            return Err(
+                format!("invalid octal permissions mode in install directive: {line:?}").into(),
+            );
+        }
+        let parsed = u32::from_str_radix(m, 8)?;
+        if parsed > 0o7777 {
+            return Err(format!(
+                "mode {m} exceeds maximum octal 7777 in install directive: {line:?}"
+            )
+            .into());
+        }
+        (parsed, m)
     } else {
-        "644" // Default mode if not specified
+        (0o644, "644")
     };
-    let mode = u32::from_str_radix(mode_str, 8)?;
 
     // Source file
     if current_idx >= parts.len() {
-        return Ok(());
+        return Err(format!("missing source file in install directive: {line:?}").into());
     }
     let raw_source = parts[current_idx].trim_matches('"');
     current_idx += 1;
+    if raw_source.is_empty() {
+        return Err(format!("missing source file in install directive: {line:?}").into());
+    }
 
     // Check if source specifies "local:" prefix or is a direct local asset path
     let (source_file_name, is_explicit_local) =
@@ -200,11 +226,53 @@ fn process_install_line(
         .into());
     }
 
+    // Destination
+    let dest_path_str = if current_idx < parts.len() && parts[current_idx] == "to" {
+        current_idx += 1; // consume "to"
+        if current_idx < parts.len() {
+            let dest = parts[current_idx].trim_matches('"').to_string();
+            current_idx += 1; // consume the destination
+            if dest.is_empty() {
+                return Err(format!(
+                    "empty destination path after 'to' in install directive: {line:?}"
+                )
+                .into());
+            }
+            dest
+        } else {
+            return Err(
+                format!("missing destination after 'to' in install directive: {line:?}").into(),
+            );
+        }
+    } else if default_to_root {
+        "/".to_string()
+    } else {
+        return Err(format!("missing 'to <destination>' in install directive: {line:?}").into());
+    };
+
+    // The grammar is exactly `install -m<mode> <source> [to <destination>]`.
+    if current_idx < parts.len() {
+        return Err(format!(
+            "unexpected trailing tokens after the install destination (quote any path containing spaces): {:?}",
+            &parts[current_idx..]
+        )
+        .into());
+    }
+
     let source_dir = Path::new(metadata_name);
-    let source_path = if is_explicit_local && Path::new(&source_file_name).exists() {
+    let source_path = if is_explicit_local
+        && let Some(mdir) = manifest_dir
+        && mdir.join(&source_file_name).exists()
+    {
+        mdir.join(&source_file_name)
+    } else if is_explicit_local && Path::new(&source_file_name).exists() {
         PathBuf::from(&source_file_name)
     } else if source_dir.join(&source_file_name).exists() {
         source_dir.join(&source_file_name)
+    } else if let Some(mdir) = manifest_dir
+        && mdir.join(&source_file_name).exists()
+    {
+        mdir.join(&source_file_name)
     } else if Path::new(&source_file_name).exists() {
         PathBuf::from(&source_file_name)
     } else {
@@ -234,34 +302,6 @@ fn process_install_line(
 
     if source_path.is_dir() {
         return Err(format!("Source is a directory, not a file: {:?}", source_path).into());
-    }
-
-    // Destination
-    let dest_path_str = if current_idx < parts.len() && parts[current_idx] == "to" {
-        current_idx += 1; // consume "to"
-        if current_idx < parts.len() {
-            let dest = parts[current_idx].trim_matches('"').to_string();
-            current_idx += 1; // consume the destination
-            dest
-        } else {
-            "/".to_string()
-        }
-    } else if default_to_root {
-        "/".to_string()
-    } else {
-        return Ok(()); // Skip if no destination and not defaulting to root
-    };
-
-    // The grammar is exactly `install -m<mode> <source> [to <destination>]`.
-    // Anything left over means an unquoted path containing spaces was split,
-    // which used to silently install files into the wrong directory (e.g.
-    // `/Program Files/TwinCAN/` landing in `/Program`).
-    if current_idx < parts.len() {
-        return Err(format!(
-            "unexpected trailing tokens after the install destination (quote any path containing spaces): {:?}",
-            &parts[current_idx..]
-        )
-        .into());
     }
 
     // Reject any destination that walks above the package root *before*
@@ -420,7 +460,7 @@ mod tests {
             "install -m644 \"local:{}\" to \"/../../escaped.txt\"",
             source.display()
         );
-        let err = process_install_line(&line, &base, "work", false)
+        let err = process_install_line(&line, &base, "work", false, None)
             .expect_err("traversal must be refused");
         assert!(err.to_string().contains("escapes package root"));
         assert!(!dir.join("escaped.txt").exists());
@@ -442,7 +482,7 @@ mod tests {
             "install -m644 \"local:{}\" to \"/usr/share/licenses/twincan/\"",
             source.display()
         );
-        process_install_line(&line, &base, "work", false).expect("install should succeed");
+        process_install_line(&line, &base, "work", false, None).expect("install should succeed");
 
         assert!(base.join("usr/share/licenses/twincan/LICENSE").is_file());
 
@@ -464,6 +504,7 @@ mod tests {
             &base,
             "work",
             false,
+            None,
         )
         .expect_err("unquoted path with spaces must be rejected, not split");
         assert!(err.to_string().contains("unexpected trailing tokens"));
@@ -482,6 +523,7 @@ mod tests {
             &base,
             "work",
             false,
+            None,
         )
         .expect_err("escaping source must be refused without local:");
         assert!(err.to_string().contains("may not escape"));
@@ -505,7 +547,7 @@ mod tests {
         std::os::unix::fs::symlink(&secret, &link).unwrap();
 
         let line = "install -m644 \"symlink_payload\" to \"/usr/bin/\"";
-        let err = process_install_line(line, &base, work.to_str().unwrap(), false)
+        let err = process_install_line(line, &base, work.to_str().unwrap(), false, None)
             .expect_err("symlink source must be rejected");
         assert!(err.to_string().contains("refusing to package a symlink"));
 
@@ -531,7 +573,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside_dir, &sym_dir).unwrap();
 
         let line = "install -m644 \"sub/secret.txt\" to \"/usr/bin/\"";
-        let err = process_install_line(line, &base, work.to_str().unwrap(), false)
+        let err = process_install_line(line, &base, work.to_str().unwrap(), false, None)
             .expect_err("canonical escape must be rejected");
         assert!(err.to_string().contains("outside the work directory"));
 
@@ -570,5 +612,66 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_process_install_line_rejects_keyword_typo() {
+        let base = Path::new("pkg");
+        let err = process_install_line("instal -m644 \"foo\" to \"/\"", base, "work", false, None)
+            .expect_err("instal must fail");
+        assert!(
+            err.to_string()
+                .contains("directive must start with 'install'")
+        );
+
+        let err2 =
+            process_install_line("Install -m644 \"foo\" to \"/\"", base, "work", false, None)
+                .expect_err("Install must fail");
+        assert!(
+            err2.to_string()
+                .contains("directive must start with 'install'")
+        );
+    }
+
+    #[test]
+    fn test_process_install_line_rejects_missing_arguments() {
+        let base = Path::new("pkg");
+        let err = process_install_line("install", base, "work", false, None)
+            .expect_err("install without args must fail");
+        assert!(err.to_string().contains("missing arguments"));
+    }
+
+    #[test]
+    fn test_process_install_line_rejects_missing_source() {
+        let base = Path::new("pkg");
+        let err = process_install_line("install -m755", base, "work", false, None)
+            .expect_err("install without source must fail");
+        assert!(err.to_string().contains("missing source file"));
+    }
+
+    #[test]
+    fn test_process_install_line_rejects_missing_destination() {
+        let base = Path::new("pkg");
+        let err = process_install_line("install -m644 \"foo\"", base, "work", false, None)
+            .expect_err("install without destination must fail when not default_to_root");
+        assert!(err.to_string().contains("missing 'to <destination>'"));
+    }
+
+    #[test]
+    fn test_process_install_line_rejects_invalid_mode() {
+        let base = Path::new("pkg");
+        let err = process_install_line("install -m888 \"foo\" to \"/\"", base, "work", false, None)
+            .expect_err("invalid octal mode must fail");
+        assert!(err.to_string().contains("invalid octal permissions mode"));
+
+        let err2 = process_install_line(
+            "install -m10000 \"foo\" to \"/\"",
+            base,
+            "work",
+            false,
+            None,
+        )
+        .expect_err("mode > 7777 must fail");
+        assert!(err2.to_string().contains("exceeds maximum octal 7777"));
     }
 }

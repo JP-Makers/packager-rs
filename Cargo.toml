@@ -39,23 +39,18 @@ walkdir = "2.5.0"
 backhand = "0.25.5"
 
 rpm = "0.30.2"
-time = { version = "0.3.55", features = ["macros"] }
 dirs = "7.0.0"
 clap = { version = "4.6.8", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-serde_yaml = "0.9"
+serde_yml = "0.0.13"
 xml = "1.4.0"
 msi = "0.11.1"
 uuid = { version = "1.29.3", features = ["v4", "v5"] }
 pgp = "0.21.1"
-rand = "0.10.4"
 ed25519 = "3.0.0"
-toml = "1.2.1"
-
-# Secure randomness for key generation on platforms without /dev/urandom.
-[target.'cfg(not(unix))'.dependencies]
 getrandom = "0.4.3"
+toml = "1.2.1"
 
 # Arch Linux (ALPM) dependencies (alpm-mtree is Linux-only).
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -64,7 +59,6 @@ alpm-mtree = "0.4.0"
 alpm-package = "0.4.4"
 alpm-buildinfo = "0.6.0"
 alpm-pkginfo = "0.7.0"
-alpm-types = "0.14.0"
 
 [profile.release]
 opt-level = "z"     # Optimize for size ("s" also good)

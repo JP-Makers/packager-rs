@@ -32,7 +32,8 @@ pub fn freebsd_package(
     let mut has_desktop_or_icons = false;
 
     if staged_dir.exists() {
-        for entry in walkdir::WalkDir::new(&staged_dir).into_iter().flatten() {
+        for entry in walkdir::WalkDir::new(&staged_dir).sort_by_file_name() {
+            let entry = entry?;
             if entry.file_type().is_file() {
                 let path = entry.path();
                 let rel = path.strip_prefix(&staged_dir).unwrap_or(path);

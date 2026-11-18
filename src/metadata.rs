@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -72,6 +72,7 @@ impl std::fmt::Display for PlatformTarget {
 
 /// Platform-specific build configuration allowing custom sources, checksums, arch, workdir, and package instructions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlatformBuildConfig {
     /// Set to `false` to skip this platform during `build_all` and to refuse an explicit build.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -116,6 +117,7 @@ fn is_true(value: &bool) -> bool {
 
 /// Container for platform-specific build tables: `[build.linux]`, `[build.mac]`, `[build.windows]`, and `[build.freebsd]`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildPlatforms {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linux: Option<PlatformBuildConfig>,
@@ -178,6 +180,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Metadata {
     #[serde(default)]
     pub name: String,
@@ -234,9 +237,6 @@ pub struct Metadata {
     /// `.BUILDINFO` `pkgbuild_sha256sum` field.
     #[serde(default)]
     pub metadata_sha256sum: String,
-    /// Backwards-compatible alias for `metadata_sha256sum`.
-    #[serde(default)]
-    pub pkgbuild_sha256sum: String,
     #[serde(default)]
     pub clean_workdir: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,6 +247,8 @@ pub struct Metadata {
     pub snap_base: String,
     #[serde(default = "default_snap_grade")]
     pub snap_grade: String,
+    #[serde(default)]
+    pub snap_plugs: Vec<String>,
     #[serde(default)]
     pub flatpak_id: String,
     #[serde(default = "default_flatpak_runtime")]
@@ -295,6 +297,8 @@ pub struct Metadata {
     pub keygen_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildPlatforms>,
+    #[serde(skip)]
+    pub manifest_dir: Option<PathBuf>,
 }
 
 impl Default for Metadata {
@@ -331,12 +335,12 @@ impl Default for Metadata {
             appimage_icon_instructions: Vec::new(),
             appimage_desktop_instructions: Vec::new(),
             metadata_sha256sum: String::new(),
-            pkgbuild_sha256sum: String::new(),
             clean_workdir: false,
             workdir: None,
             snap_confinement: "strict".to_string(),
             snap_base: "core22".to_string(),
             snap_grade: "stable".to_string(),
+            snap_plugs: Vec::new(),
             flatpak_id: String::new(),
             flatpak_runtime: "org.freedesktop.Platform".to_string(),
             flatpak_runtime_version: "24.08".to_string(),
@@ -361,6 +365,7 @@ impl Default for Metadata {
             keygen: false,
             keygen_key: String::new(),
             build: None,
+            manifest_dir: None,
         }
     }
 }
@@ -468,6 +473,12 @@ fn validate_source_checksums(
         );
     }
 
+    if sha256sums.is_empty() && sha512sums.is_empty() {
+        eprintln!(
+            "Warning: {context} sources only provide weak checksums (md5/sha1); sha256 or sha512 is strongly recommended"
+        );
+    }
+
     if !sha256sums.is_empty() {
         validate_checksum_list("sha256sums", sha256sums, sources, 64)?;
     }
@@ -482,6 +493,25 @@ fn validate_source_checksums(
     }
 
     Ok(())
+}
+
+fn reverse_dns_id(prefix: &str, maintainer: &str, name: &str) -> String {
+    let clean_maintainer: String = maintainer
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
+    let m = if clean_maintainer.is_empty() {
+        "example"
+    } else {
+        &clean_maintainer
+    };
+    let clean_name: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .collect::<String>()
+        .to_lowercase();
+    format!("{prefix}.{m}.{clean_name}")
 }
 
 impl Metadata {
@@ -502,7 +532,10 @@ impl Metadata {
         let mut file = File::open(p)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
-        Self::from_bytes(&buffer)
+        let mut meta = Self::from_bytes(&buffer)?;
+        let dir = p.parent().unwrap_or_else(|| Path::new("."));
+        meta.manifest_dir = Some(dir.to_path_buf());
+        Ok(meta)
     }
 
     /// Parse metadata from a string slice in TOML format (also implements `std::str::FromStr`).
@@ -519,8 +552,7 @@ impl Metadata {
 
         let text = std::str::from_utf8(bytes)?;
         let mut meta: Metadata = toml::from_str(text)?;
-        meta.metadata_sha256sum = hash.clone();
-        meta.pkgbuild_sha256sum = hash;
+        meta.metadata_sha256sum = hash;
         meta.validate()?;
         Ok(meta)
     }
@@ -628,6 +660,9 @@ impl Metadata {
 
         // Single-line checks for platform metadata fields
         validate_single_line("appimage_exec", &self.appimage_exec)?;
+        for plug in &self.snap_plugs {
+            validate_single_line("snap_plugs", plug)?;
+        }
         validate_single_line("flatpak_id", &self.flatpak_id)?;
         validate_single_line("flatpak_runtime", &self.flatpak_runtime)?;
         validate_single_line("flatpak_runtime_version", &self.flatpak_runtime_version)?;
@@ -754,6 +789,10 @@ impl Metadata {
             }
         }
 
+        if self.platform_enabled(PlatformTarget::Windows) {
+            self.msi_version()?;
+        }
+
         Ok(())
     }
 
@@ -836,6 +875,11 @@ impl Metadata {
         if let Some(cfg) = self.platform_build_config(target) {
             if !cfg.sources.is_empty() {
                 platform_meta.sources = cfg.sources.clone();
+                // Clear inherited checksums so platform sources don't conflict with top-level algorithms
+                platform_meta.sha256sums.clear();
+                platform_meta.sha512sums.clear();
+                platform_meta.sha1sums.clear();
+                platform_meta.md5sums.clear();
             }
             if !cfg.sha256sums.is_empty() {
                 platform_meta.sha256sums = cfg.sha256sums.clone();
@@ -964,29 +1008,34 @@ impl Metadata {
         self.clean_workdir
     }
 
+    /// Return the list of Snap plugs. If not explicitly defined, returns minimal defaults
+    /// (desktop, desktop-legacy, x11, wayland, opengl, home, network, audio-playback).
+    pub fn snap_plugs(&self) -> Vec<&str> {
+        if !self.snap_plugs.is_empty() {
+            self.snap_plugs.iter().map(|s| s.as_str()).collect()
+        } else {
+            vec![
+                "desktop",
+                "desktop-legacy",
+                "x11",
+                "wayland",
+                "opengl",
+                "home",
+                "network",
+                "audio-playback",
+            ]
+        }
+    }
+
     /// Return the Flatpak reverse-DNS Application ID (e.g. `org.jpmakers.twincan`).
     pub fn flatpak_id(&self) -> String {
         if !self.flatpak_id.is_empty() {
             return self.flatpak_id.clone();
         }
-        let clean_maintainer: String = self
-            .maintainer
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect::<String>()
-            .to_lowercase();
-        let m = if clean_maintainer.is_empty() {
-            "example".to_string()
-        } else {
-            clean_maintainer
-        };
-        let clean_name: String = self
-            .name
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
-            .collect::<String>()
-            .to_lowercase();
-        format!("org.{}.{}", m, clean_name)
+        if !self.mac_bundle_id.is_empty() {
+            return self.mac_bundle_id.clone();
+        }
+        reverse_dns_id("org", &self.maintainer, &self.name)
     }
 
     /// Return the main executable filename inside the package.
@@ -1005,33 +1054,17 @@ impl Metadata {
         if !self.mac_bundle_id.is_empty() {
             return self.mac_bundle_id.clone();
         }
-        let clean_maintainer: String = self
-            .maintainer
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect::<String>()
-            .to_lowercase();
-        let m = if clean_maintainer.is_empty() {
-            "example".to_string()
-        } else {
-            clean_maintainer
-        };
-        let clean_name: String = self
-            .name
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
-            .collect::<String>()
-            .to_lowercase();
-        format!("com.{}.{}", m, clean_name)
+        if !self.flatpak_id.is_empty() {
+            return self.flatpak_id.clone();
+        }
+        reverse_dns_id("com", &self.maintainer, &self.name)
     }
 
     /// Return the application display name suitable for macOS .app bundles (e.g. `TwinCAN`).
     pub fn app_name(&self) -> String {
+        let exe = self.executable_name();
         if !self.appimage_exec.is_empty() {
-            let p = Path::new(&self.appimage_exec);
-            if let Some(file_name) = p.file_name().and_then(|s| s.to_str()) {
-                return file_name.to_string();
-            }
+            return exe;
         }
         let mut chars = self.name.chars();
         match chars.next() {
@@ -1100,15 +1133,68 @@ impl Metadata {
     }
 
     /// Return a 3-part numeric version string (e.g. `1.2.3`) required by MSI ProductVersion.
-    pub fn msi_version(&self) -> String {
-        let clean = self.version.split('-').next().unwrap_or("1.0.0");
+    ///
+    /// Validates that the version has at most 3 numeric fields (`major.minor[.build]`),
+    /// `major < 256`, `minor < 256`, and `build < 65536`.
+    pub fn msi_version(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let clean = self.version.split('-').next().unwrap_or(&self.version);
         let parts: Vec<&str> = clean.split('.').collect();
-        match parts.len() {
-            0 => "1.0.0".to_string(),
-            1 => format!("{}.0.0", parts[0]),
-            2 => format!("{}.{}.0", parts[0], parts[1]),
-            _ => format!("{}.{}.{}", parts[0], parts[1], parts[2]),
+        if parts.is_empty() || parts.len() > 3 {
+            return Err(format!(
+                "MSI ProductVersion requires 1 to 3 numeric components (major.minor[.build]), found {:?}",
+                self.version
+            )
+            .into());
         }
+
+        let major: u32 = parts[0].parse().map_err(|_| {
+            format!(
+                "invalid MSI major version {:?}: must be a numeric integer under 256",
+                parts[0]
+            )
+        })?;
+        if major > 255 {
+            return Err(format!(
+                "MSI major version {major} exceeds maximum permitted value of 255"
+            )
+            .into());
+        }
+
+        let minor: u32 = if parts.len() > 1 {
+            parts[1].parse().map_err(|_| {
+                format!(
+                    "invalid MSI minor version {:?}: must be a numeric integer under 256",
+                    parts[1]
+                )
+            })?
+        } else {
+            0
+        };
+        if minor > 255 {
+            return Err(format!(
+                "MSI minor version {minor} exceeds maximum permitted value of 255"
+            )
+            .into());
+        }
+
+        let build: u32 = if parts.len() > 2 {
+            parts[2].parse().map_err(|_| {
+                format!(
+                    "invalid MSI build version {:?}: must be a numeric integer under 65536",
+                    parts[2]
+                )
+            })?
+        } else {
+            0
+        };
+        if build > 65535 {
+            return Err(format!(
+                "MSI build version {build} exceeds maximum permitted value of 65535"
+            )
+            .into());
+        }
+
+        Ok(format!("{major}.{minor}.{build}"))
     }
 
     /// Serialize metadata to a TOML string.
@@ -1123,8 +1209,7 @@ impl Metadata {
         let hash = hex::encode(hasher.finalize());
 
         let mut meta: Metadata = toml::from_str(toml_str)?;
-        meta.metadata_sha256sum = hash.clone();
-        meta.pkgbuild_sha256sum = hash;
+        meta.metadata_sha256sum = hash;
         meta.validate()?;
         Ok(meta)
     }
@@ -1142,13 +1227,13 @@ impl Metadata {
     }
 
     /// Serialize metadata to a YAML string.
-    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
-        serde_yaml::to_string(self)
+    pub fn to_yaml(&self) -> Result<String, serde_yml::Error> {
+        serde_yml::to_string(self)
     }
 
     /// Deserialize metadata from a YAML string.
     pub fn from_yaml(yaml_str: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let meta: Metadata = serde_yaml::from_str(yaml_str)?;
+        let meta: Metadata = serde_yml::from_str(yaml_str)?;
         meta.validate()?;
         Ok(meta)
     }
@@ -1160,10 +1245,6 @@ impl std::str::FromStr for Metadata {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::from_bytes(s.as_bytes())
     }
-}
-
-pub fn extract_metadata(metadata_path: &str) -> Result<Metadata, Box<dyn std::error::Error>> {
-    Metadata::from_file(metadata_path)
 }
 
 #[cfg(test)]
@@ -1621,5 +1702,82 @@ sha256sums = ["a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4"
             err.to_string().contains("url must start with http"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn test_rejects_unknown_fields() {
+        let raw = valid_toml("rpm_depend = [\"glibc\"]");
+        let err = Metadata::from_str(&raw).expect_err("unknown field must fail deserialization");
+        assert!(err.to_string().contains("unknown field"), "{err}");
+
+        let raw_platform = valid_toml("[build.linux]\nunknown_platform_field = true");
+        let err2 = Metadata::from_str(&raw_platform).expect_err("unknown platform field must fail");
+        assert!(err2.to_string().contains("unknown field"), "{err2}");
+    }
+
+    #[test]
+    fn test_platform_sources_clears_inherited_checksums() {
+        let raw = r#"
+name = "testapp"
+version = "1.0.0"
+release = "1"
+maintainer = "Dev"
+description = "Test app"
+url = "https://example.com"
+license = "MIT"
+arch = ["x86_64"]
+sources = ["https://example.com/linux.tar.gz"]
+sha512sums = ["c02347101e467cfeb2d2946c98ea9ab06b12d5d852614b7f94119d5e386ab4025ab7fe878c7406a64010b93d6ee1fa816281be2d7c5417855b57f0df5607db27"]
+
+[build.windows]
+sources = ["https://example.com/win.zip"]
+sha256sums = ["a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4"]
+"#;
+        let meta = Metadata::from_str(raw).expect("parse metadata");
+        let win_meta = meta.for_platform(PlatformTarget::Windows);
+        assert_eq!(win_meta.sources, vec!["https://example.com/win.zip"]);
+        assert_eq!(
+            win_meta.sha256sums,
+            vec!["a31c61e733ae21eaa645de0e870c03d4fdb812c7e5a0a5666ef229ceba7fa8f4"]
+        );
+        assert!(
+            win_meta.sha512sums.is_empty(),
+            "inherited sha512sums must be cleared"
+        );
+        assert!(
+            win_meta.validate().is_ok(),
+            "platform validation must succeed"
+        );
+    }
+
+    #[test]
+    fn test_msi_version_validation() {
+        let mut meta = Metadata {
+            name: "app".to_string(),
+            version: "1.2.3".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(meta.msi_version().unwrap(), "1.2.3");
+
+        meta.version = "2.4".to_string();
+        assert_eq!(meta.msi_version().unwrap(), "2.4.0");
+
+        meta.version = "5".to_string();
+        assert_eq!(meta.msi_version().unwrap(), "5.0.0");
+
+        meta.version = "1.0.0rc1".to_string();
+        assert!(meta.msi_version().is_err());
+
+        meta.version = "2024.11.18".to_string();
+        assert!(meta.msi_version().is_err());
+
+        meta.version = "1.300.0".to_string();
+        assert!(meta.msi_version().is_err());
+
+        meta.version = "1.0.70000".to_string();
+        assert!(meta.msi_version().is_err());
+
+        meta.version = "1.2.3.4".to_string();
+        assert!(meta.msi_version().is_err());
     }
 }

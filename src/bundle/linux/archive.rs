@@ -94,9 +94,7 @@ fn root_header(entry_type: EntryType, size: u64, mode: u32, mtime: u64) -> io::R
 /// `SOURCE_DATE_EPOCH` wins when set, so a release build is reproducible;
 /// otherwise the source file's own mtime is kept.
 fn mtime(metadata: &fs::Metadata) -> u64 {
-    if let Some(epoch) = std::env::var_os("SOURCE_DATE_EPOCH")
-        .and_then(|v| v.to_str().and_then(|s| s.parse::<u64>().ok()))
-    {
+    if let Some(epoch) = crate::repro::source_date_epoch() {
         return epoch;
     }
 

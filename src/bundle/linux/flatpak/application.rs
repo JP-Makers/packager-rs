@@ -117,8 +117,8 @@ impl FlatpakApplication {
     }
 
     /// Serialize to YAML format.
-    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
-        serde_yaml::to_string(self)
+    pub fn to_yaml(&self) -> Result<String, serde_yml::Error> {
+        serde_yml::to_string(self)
     }
 
     /// Dump to string according to `FlatpakManifestFormat`.

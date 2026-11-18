@@ -2,10 +2,13 @@ use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use liblzma::read::XzDecoder;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 use tar::Archive;
 use zstd::stream::read::Decoder as ZstdDecoder;
+
+/// Maximum allowed decompressed size (8 GiB) to protect against decompression bombs.
+pub const MAX_UNPACK_SIZE: u64 = 8 * 1024 * 1024 * 1024;
 
 pub fn unpack_source(path: &str, dest: &str) -> io::Result<()> {
     fs::create_dir_all(dest)?;
@@ -21,32 +24,61 @@ pub fn unpack_source(path: &str, dest: &str) -> io::Result<()> {
     match extension.as_str() {
         "gz" | "tgz" => {
             let decoder = GzDecoder::new(file);
-            let mut archive = Archive::new(decoder);
+            let mut archive = Archive::new(decoder.take(MAX_UNPACK_SIZE));
             archive.unpack(dest)?;
         }
         "xz" | "txz" => {
             let decoder = XzDecoder::new(file);
-            let mut archive = Archive::new(decoder);
+            let mut archive = Archive::new(decoder.take(MAX_UNPACK_SIZE));
             archive.unpack(dest)?;
         }
         "bz2" | "tbz2" => {
             let decoder = BzDecoder::new(file);
-            let mut archive = Archive::new(decoder);
+            let mut archive = Archive::new(decoder.take(MAX_UNPACK_SIZE));
             archive.unpack(dest)?;
         }
         "zst" => {
             let decoder = ZstdDecoder::new(file)?;
-            let mut archive = Archive::new(decoder);
+            let mut archive = Archive::new(decoder.take(MAX_UNPACK_SIZE));
             archive.unpack(dest)?;
         }
         "zip" => {
             let mut archive = zip::ZipArchive::new(file)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            archive.extract(dest).map_err(io::Error::other)?;
+            let mut total_unpacked: u64 = 0;
+            for i in 0..archive.len() {
+                let mut zip_file = archive
+                    .by_index(i)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                total_unpacked += zip_file.size();
+                if total_unpacked > MAX_UNPACK_SIZE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "decompressed zip archive exceeds maximum permitted size of {MAX_UNPACK_SIZE} bytes"
+                        ),
+                    ));
+                }
+                let outpath = match zip_file.enclosed_name() {
+                    Some(path) => Path::new(dest).join(path),
+                    None => continue,
+                };
+                if zip_file.is_dir() {
+                    fs::create_dir_all(&outpath)?;
+                } else {
+                    if let Some(p) = outpath.parent()
+                        && !p.exists()
+                    {
+                        fs::create_dir_all(p)?;
+                    }
+                    let mut outfile = File::create(&outpath)?;
+                    io::copy(&mut (&mut zip_file).take(MAX_UNPACK_SIZE), &mut outfile)?;
+                }
+            }
         }
         _ => {
             if path.ends_with(".tar") {
-                let mut archive = Archive::new(file);
+                let mut archive = Archive::new(file.take(MAX_UNPACK_SIZE));
                 archive.unpack(dest)?;
             } else {
                 return Err(io::Error::new(

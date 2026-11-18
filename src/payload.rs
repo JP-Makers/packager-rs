@@ -19,6 +19,72 @@ pub(crate) fn is_macho(bytes: &[u8]) -> bool {
     )
 }
 
+const CPU_TYPE_X86_64: u32 = 0x01000007;
+const CPU_TYPE_ARM64: u32 = 0x0100000c;
+
+/// Return true when `bytes` is a Mach-O binary compatible with `declared_arch`.
+pub(crate) fn macho_matches_arch(bytes: &[u8], declared_arch: &str) -> bool {
+    let magic = match bytes.get(..4) {
+        Some(m) => m,
+        None => return false,
+    };
+
+    let target_cpu = match declared_arch {
+        "x86_64" | "amd64" => Some(CPU_TYPE_X86_64),
+        "aarch64" | "arm64" => Some(CPU_TYPE_ARM64),
+        "universal" => None,
+        _ => return true,
+    };
+
+    match magic {
+        // Thin 64-bit little endian
+        [0xcf, 0xfa, 0xed, 0xfe] => {
+            if let Some(target) = target_cpu {
+                let cputype = bytes
+                    .get(4..8)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+                cputype == Some(target)
+            } else {
+                true
+            }
+        }
+        // Thin 64-bit big endian
+        [0xfe, 0xed, 0xfa, 0xcf] => {
+            if let Some(target) = target_cpu {
+                let cputype = bytes
+                    .get(4..8)
+                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()));
+                cputype == Some(target)
+            } else {
+                true
+            }
+        }
+        // Fat binary (big-endian)
+        [0xca, 0xfe, 0xba, 0xbe] => {
+            let Some(count_bytes) = bytes.get(4..8) else {
+                return false;
+            };
+            let nfat = u32::from_be_bytes(count_bytes.try_into().unwrap()) as usize;
+            if let Some(target) = target_cpu {
+                for i in 0..nfat {
+                    let offset = 8 + i * 20;
+                    if let Some(arch_bytes) = bytes.get(offset..offset + 4) {
+                        let cputype = u32::from_be_bytes(arch_bytes.try_into().unwrap());
+                        if cputype == target {
+                            return true;
+                        }
+                    }
+                }
+                false
+            } else {
+                true
+            }
+        }
+        [0xce, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xce] => true,
+        _ => false,
+    }
+}
+
 /// Return true when `bytes` is a Windows PE image (`MZ` header plus `PE\0\0`).
 pub(crate) fn is_pe(bytes: &[u8]) -> bool {
     if !bytes.starts_with(b"MZ") {
@@ -84,5 +150,27 @@ mod tests {
         assert!(!is_macho(b"\x7fELF"));
         assert!(!is_macho(b"\xcf\xfa"));
         assert!(!is_macho(&[]));
+    }
+
+    #[test]
+    fn test_macho_matches_arch() {
+        // x86_64 Mach-O fixture (little endian 64-bit)
+        let mut x86_64_bin = vec![0u8; 16];
+        x86_64_bin[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        x86_64_bin[4..8].copy_from_slice(&0x01000007u32.to_le_bytes());
+
+        // arm64 Mach-O fixture (little endian 64-bit)
+        let mut arm64_bin = vec![0u8; 16];
+        arm64_bin[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        arm64_bin[4..8].copy_from_slice(&0x0100000cu32.to_le_bytes());
+
+        assert!(macho_matches_arch(&x86_64_bin, "x86_64"));
+        assert!(!macho_matches_arch(&x86_64_bin, "arm64"));
+
+        assert!(macho_matches_arch(&arm64_bin, "arm64"));
+        assert!(macho_matches_arch(&arm64_bin, "aarch64"));
+        assert!(!macho_matches_arch(&arm64_bin, "x86_64"));
+
+        assert!(macho_matches_arch(&x86_64_bin, "universal"));
     }
 }

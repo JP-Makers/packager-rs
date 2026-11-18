@@ -8,6 +8,13 @@ use tokio::io::AsyncWriteExt;
 pub const MAX_DOWNLOAD_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 pub async fn fetch_source(source: &str) -> Result<String, Box<dyn std::error::Error>> {
+    fetch_source_with_base(source, None).await
+}
+
+pub async fn fetch_source_with_base(
+    source: &str,
+    base_dir: Option<&Path>,
+) -> Result<String, Box<dyn std::error::Error>> {
     if source.starts_with("http://") || source.starts_with("https://") {
         // Try to get filename from URL (stripping any query params and trailing slashes)
         let clean_source = source
@@ -77,11 +84,37 @@ pub async fn fetch_source(source: &str) -> Result<String, Box<dyn std::error::Er
         println!("Download of {} complete!", filename);
         Ok(filename)
     } else {
-        // Assume local path
-        let path = Path::new(source);
-        if !path.exists() {
+        // Assume local path (with optional file:// prefix)
+        let local_source = if let Some(stripped) = source.strip_prefix("file://") {
+            #[cfg(windows)]
+            {
+                let s = stripped.strip_prefix("localhost").unwrap_or(stripped);
+                if s.starts_with('/') && s.len() > 2 && s.as_bytes()[2] == b':' {
+                    &s[1..]
+                } else {
+                    s
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                stripped.strip_prefix("localhost").unwrap_or(stripped)
+            }
+        } else {
+            source
+        };
+
+        let path_candidate = Path::new(local_source);
+        let path = if let Some(base) = base_dir
+            && !path_candidate.is_absolute()
+            && base.join(local_source).exists()
+        {
+            base.join(local_source)
+        } else if path_candidate.exists() {
+            path_candidate.to_path_buf()
+        } else {
             return Err(format!("Source path does not exist: {}", source).into());
-        }
+        };
+
         if path.is_dir() {
             return Err(format!("Source path is a directory, not a file: {}", source).into());
         }
@@ -105,8 +138,8 @@ pub async fn fetch_source(source: &str) -> Result<String, Box<dyn std::error::Er
         }
 
         // Copy local file to current directory
-        fs::copy(source, &filename).await?;
-        println!("Copied {} to current directory", source);
+        fs::copy(&path, &filename).await?;
+        println!("Copied {} to current directory", path.display());
 
         Ok(filename)
     }
@@ -128,5 +161,21 @@ mod tests {
     async fn test_fetch_source_rejects_directory() {
         let err = fetch_source("src").await.expect_err("directory must error");
         assert!(err.to_string().contains("is a directory"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_source_file_scheme() {
+        let tmp = std::env::temp_dir().join(format!(
+            "test_fetch_file_{}.txt",
+            uuid::Uuid::new_v4().hyphenated()
+        ));
+        std::fs::write(&tmp, b"test payload").unwrap();
+        let uri = format!("file://{}", tmp.display());
+        let res = fetch_source(&uri)
+            .await
+            .expect("fetch file:// should succeed");
+        assert_eq!(res, tmp.file_name().unwrap().to_str().unwrap());
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&res);
     }
 }

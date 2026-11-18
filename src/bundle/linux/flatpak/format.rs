@@ -23,13 +23,13 @@ impl FlatpakManifestFormat {
     }
 
     /// Parse a manifest string into type `T`.
-    pub fn parse<T: DeserializeOwned>(
+    pub fn parse<T: DeserializeOwned + 'static>(
         &self,
         content: &str,
     ) -> Result<T, Box<dyn std::error::Error>> {
         match self {
             Self::JSON => Ok(serde_json::from_str(content)?),
-            Self::YAML => Ok(serde_yaml::from_str(content)?),
+            Self::YAML => Ok(serde_yml::from_str(content)?),
         }
     }
 
@@ -37,7 +37,7 @@ impl FlatpakManifestFormat {
     pub fn dump<T: Serialize>(&self, value: &T) -> Result<String, Box<dyn std::error::Error>> {
         match self {
             Self::JSON => Ok(serde_json::to_string_pretty(value)?),
-            Self::YAML => Ok(serde_yaml::to_string(value)?),
+            Self::YAML => Ok(serde_yml::to_string(value)?),
         }
     }
 }

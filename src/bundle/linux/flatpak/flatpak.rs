@@ -35,6 +35,7 @@ pub fn flatpak_package(
 
     // Look for desktop and icon in files_dir and export them
     if let Ok(entries) = walkdir::WalkDir::new(&files_dir)
+        .sort_by_file_name()
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
     {
@@ -141,7 +142,7 @@ fn create_flatpak_bundle(
     let enc = GzEncoder::new(file, Compression::default());
     let mut tar = Builder::new(enc);
 
-    for entry in walkdir::WalkDir::new(base_dir) {
+    for entry in walkdir::WalkDir::new(base_dir).sort_by_file_name() {
         let entry = entry?;
         let path = entry.path();
         let rel_path = path.strip_prefix(base_dir)?;

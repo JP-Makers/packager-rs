@@ -299,7 +299,7 @@ pub fn msi_package(
     let upgrade_code_str = metadata.win_upgrade_code();
     let manufacturer_str = metadata.win_manufacturer();
     let app_name_str = metadata.app_name();
-    let msi_version_str = metadata.msi_version();
+    let msi_version_str = metadata.msi_version()?;
     let install_dir_str = metadata.win_install_dir();
 
     // 1. Configure Summary Information

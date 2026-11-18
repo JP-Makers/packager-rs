@@ -97,6 +97,14 @@ pub fn build_oci_manifest(
     root_dir: &Path,
     output_dir: &Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let target_arch = metadata.primary_arch();
+    if target_arch.eq_ignore_ascii_case("all") || target_arch.eq_ignore_ascii_case("any") {
+        return Err(format!(
+            "OCI container images require a concrete architecture, got '{target_arch}'"
+        )
+        .into());
+    }
+
     fs::create_dir_all(output_dir)?;
 
     // 1. Create rootfs tar archive
@@ -105,7 +113,10 @@ pub fn build_oci_manifest(
         let mut tar_builder = tar::Builder::new(&mut tar_bytes);
         tar_builder.mode(tar::HeaderMode::Deterministic);
 
-        for entry in walkdir::WalkDir::new(root_dir).min_depth(1) {
+        for entry in walkdir::WalkDir::new(root_dir)
+            .min_depth(1)
+            .sort_by_file_name()
+        {
             let entry = entry?;
             let rel_path = entry.path().strip_prefix(root_dir)?;
             let rel_str = rel_path.to_string_lossy().into_owned();
@@ -151,11 +162,16 @@ pub fn build_oci_manifest(
         other => other,
     };
 
-    let entrypoint = if !metadata.appimage_exec.is_empty() {
-        vec![metadata.appimage_exec.clone()]
+    let abs_entrypoint = if !metadata.appimage_exec.is_empty() {
+        if metadata.appimage_exec.starts_with('/') {
+            metadata.appimage_exec.clone()
+        } else {
+            format!("/{}", metadata.appimage_exec)
+        }
     } else {
-        vec![format!("/usr/bin/{}", metadata.name)]
+        format!("/usr/bin/{}", metadata.name)
     };
+    let entrypoint = vec![abs_entrypoint];
 
     let config_struct = OciConfig {
         created: created_ts,
@@ -435,6 +451,59 @@ mod tests {
                 assert_eq!(hex::encode(hasher.finalize()), layer_hex);
             }
         }
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_oci_rejects_arch_all() {
+        let tmp = std::env::temp_dir().join("test_oci_arch_all");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let metadata = Metadata {
+            name: "allapp".to_string(),
+            version: "1.0.0".to_string(),
+            arch: vec!["all".to_string()],
+            ..Default::default()
+        };
+
+        let err =
+            build_oci_manifest(&metadata, &tmp, &tmp.join("out")).expect_err("arch=all must fail");
+        assert!(err.to_string().contains("require a concrete architecture"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_oci_entrypoint_is_absolute() {
+        let tmp = std::env::temp_dir().join("test_oci_entrypoint");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let rootfs = tmp.join("rootfs");
+        fs::create_dir_all(rootfs.join("bin")).unwrap();
+        fs::write(rootfs.join("bin/app"), b"bin").unwrap();
+
+        let metadata = Metadata {
+            name: "myapp".to_string(),
+            version: "1.0.0".to_string(),
+            arch: vec!["x86_64".to_string()],
+            appimage_exec: "bin/app".to_string(),
+            ..Default::default()
+        };
+
+        let out = tmp.join("out");
+        let manifest_path = build_oci_manifest(&metadata, &rootfs, &out).unwrap();
+        assert!(manifest_path.exists());
+
+        let blobs_dir = out.join("blobs/sha256");
+        let manifest: OciManifest =
+            serde_json::from_str(&fs::read_to_string(manifest_path).unwrap()).unwrap();
+        let cfg_hex = manifest.config.digest.strip_prefix("sha256:").unwrap();
+        let cfg: OciConfig =
+            serde_json::from_str(&fs::read_to_string(blobs_dir.join(cfg_hex)).unwrap()).unwrap();
+        assert_eq!(cfg.config.entrypoint, vec!["/bin/app"]);
 
         let _ = fs::remove_dir_all(&tmp);
     }

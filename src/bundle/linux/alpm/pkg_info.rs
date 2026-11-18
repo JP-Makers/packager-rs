@@ -40,6 +40,12 @@ pub fn create_package_info(
         dynamic_fields.push_str(&format!("depend = {}\n", dep));
     }
 
+    let packager_str = if metadata.email.is_empty() {
+        metadata.maintainer.clone()
+    } else {
+        format!("{} <{}>", metadata.maintainer, metadata.email)
+    };
+
     write!(
         file,
         r#"pkgname = {}
@@ -49,7 +55,7 @@ pkgver = {}-{}
 pkgdesc = {}
 url = {}
 builddate = {}
-packager = {} <{}>
+packager = {}
 size = {}
 arch = {}
 license = {}
@@ -61,8 +67,7 @@ license = {}
         metadata.description,
         metadata.url,
         super::build_info::get_build_date(),
-        metadata.maintainer,
-        metadata.email,
+        packager_str,
         get_installed_size(input_path),
         metadata.arch.first().unwrap_or(&"any".to_string()),
         metadata.license,
