@@ -21,7 +21,7 @@ tar = "0.4.46"
 liblzma = "0.4.9"
 zstd = "0.14.4"
 ar = "0.9.0"
-zip = { version = "9.6.1", default-features = false, features = [
+zip = { version = "9.7.0", default-features = false, features = [
     "deflate-flate2",
 ] }
 
@@ -52,21 +52,12 @@ ed25519 = "3.0.0"
 getrandom = "0.4.3"
 toml = "1.2.1"
 
-# Arch Linux (ALPM) dependencies (alpm-mtree is Linux-only).
-[target.'cfg(target_os = "linux")'.dependencies]
-alpm-compress = "0.1.5"
-alpm-mtree = "0.4.0"
-alpm-package = "0.4.4"
-alpm-buildinfo = "0.6.0"
-alpm-pkginfo = "0.7.0"
-
 [profile.release]
-opt-level = "z"     # Optimize for size ("s" also good)
-lto = true          # Link Time Optimization
-codegen-units = 1   # Maximum size optimization
-panic = "abort"     # Remove unwinding tables
-strip = true        # Strip debug symbols
+opt-level = "z"   # Optimize for size ("s" also good)
+lto = true        # Link Time Optimization
+codegen-units = 1 # Maximum size optimization
+panic = "abort"   # Remove unwinding tables
+strip = true      # Strip debug symbols
 
 [lints.clippy]
 panic = "warn"
-

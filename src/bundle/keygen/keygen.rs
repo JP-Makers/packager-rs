@@ -152,12 +152,12 @@ fn secure_write_secret(path: &Path, data: &[u8]) -> Result<(), Box<dyn std::erro
     use std::io::Write;
 
     if let Some(parent) = path.parent() {
-        let parent_existed = parent.exists();
+        let _parent_existed = parent.exists();
         fs::create_dir_all(parent)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if !parent_existed {
+            if !_parent_existed {
                 let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
             }
         }

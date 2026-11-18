@@ -17,7 +17,7 @@ pub use bundle::keygen::{
     generate_or_load_key, generate_or_load_key_in, generate_zsync, parse_ed25519_armored_signature,
     run_keygen, run_keygen_with_key_dir, sign_bytes, validate_ed25519_signature, verify_signature,
 };
-pub use bundle::linux::alpm::alpm_package;
+pub use bundle::linux::alpm::{alpm_package, normalize_alpm_package};
 pub use bundle::linux::appimage::{EMBEDDED_RUNTIMES, EmbeddedRuntimeInfo, appimage_package};
 pub use bundle::linux::deb::deb_package;
 pub use bundle::linux::flatpak::{

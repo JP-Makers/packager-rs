@@ -12,7 +12,7 @@ Initial release of `packager-rs` and `package-builder`: a unified, multi-format 
 ### Added
 - **Multi-distro Linux Packaging:**
   - Debian / Ubuntu (`.deb`): standard `ar` archive with gzip-compressed `control` and `data`, deterministic mtimes, and automatic desktop/icon scriptlets.
-  - Arch Linux (`.pkg.tar.zst`): pure-Rust ALPM packaging with `.PKGINFO`, `.BUILDINFO` v2, and normalized `.MTREE` (Linux-only native builder; stubs on non-Linux).
+  - Arch Linux (`.pkg.tar.zst`): 100% pure-Rust cross-platform ALPM packaging with `.PKGINFO`, `.BUILDINFO` v2, and gzip BSD `.MTREE` (fully supported across Linux, Windows, macOS, and FreeBSD with no platform-specific C/FFI dependencies).
   - Fedora / RHEL (`.rpm`): pure-Rust RPM v4 package generation with parsed dependency version operators (`>=`, `<=`, `=`, `>`, `<`), automatic `%post`/`%postun` scriptlets, and compressed payloads.
   - AppImage (`.AppImage`): standalone portable bundles with embedded type-2 runtimes for `x86_64`, `aarch64`, `armhf`, and `i686`, SquashFS filesystems, `.DirIcon` extraction, and dynamic multiarch environment exports in `AppRun`.
   - Canonical Snap (`.snap`): SquashFS container packaging with strict `meta/snap.yaml`, configurable plugs with secure minimal defaults, and deterministic icon and desktop selection.

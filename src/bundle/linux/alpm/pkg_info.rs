@@ -1,8 +1,5 @@
-#[cfg(target_os = "linux")]
 use crate::metadata::Metadata;
-#[cfg(target_os = "linux")]
 use std::fs::File;
-#[cfg(target_os = "linux")]
 use std::io::Write;
 use std::path::Path;
 
@@ -21,7 +18,6 @@ pub fn get_installed_size(input_path: impl AsRef<Path>) -> u64 {
     total_size
 }
 
-#[cfg(target_os = "linux")]
 pub fn create_package_info(
     input_path: impl AsRef<Path>,
     metadata: &Metadata,

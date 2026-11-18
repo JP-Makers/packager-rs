@@ -19,7 +19,7 @@ A fast, pure-Rust multi-format packaging engine and library. Package CLI utiliti
 | Format | Extension | Target OS | Status | Build Engine |
 | :--- | :--- | :--- | :---: | :--- |
 | **Debian / Ubuntu** | `.deb` | Linux | **Production** | Pure Rust (`ar` + gzip `control`/`data`, auto desktop/icon scripts) |
-| **Arch Linux (ALPM)**| `.pkg.tar.zst` | Linux | **Production** | Pure Rust (`alpm-package`, `.PKGINFO`, `.BUILDINFO` v2, `.MTREE`) |
+| **Arch Linux (ALPM)**| `.pkg.tar.zst` | Linux | **Production** | Pure Rust (`tar` + `zstd`, `.PKGINFO`, `.BUILDINFO` v2, gzip BSD `.MTREE`) |
 | **Fedora / RHEL / SUSE** | `.rpm` | Linux | **Production** | Pure Rust (RPM v4, gzip payload, auto `%post`/`%postun` scriptlets) |
 | **Standalone Portable**| `.AppImage` | Linux | **Production** | Pure Rust (embedded ELF runtime + SquashFS payload + `.DirIcon`) |
 | **Cryptographic Signer**| `.asc` / `.sig` | All | **Production** | Pure Rust Ed25519 OpenPGP, `zsync` deltas, and `SHA256SUMS.txt` |
